@@ -308,7 +308,7 @@ digraph {
 
 ### hclfmt
 
-Recursively find `terragrunt.hcl` files and rewrite them into a canonical format.
+Recursively find hcl files and rewrite them into a canonical format.
 
 Example:
 
@@ -317,7 +317,7 @@ terragrunt hclfmt
 ```
 
 This will recursively search the current working directory for any folders that contain Terragrunt configuration files
-(`terragrunt.hcl`) and run the equivalent of `terraform fmt` on them.
+and run the equivalent of `terraform fmt` on them.
 
 
 ### aws-provider-patch
@@ -330,13 +330,17 @@ This command is a hacky attempt at working around this problem by allowing you t
 attributes so `import` can work.
 
 You specify which attributes to hard-code using the [`--terragrunt-override-attr`](#terragrunt-override-attr) option,
-passing it `ATTR=VALUE`, where `ATTR` is the attribute name and `VALUE` is the new value. Note that `ATTR` can specify
-attributes within a nested block by specifying `<BLOCK>.<ATTR>`, where `<BLOCK>` is the block name. For example, let's
-say you had a `provider` block in a module that looked like this:
+passing it `ATTR=VALUE`, where `ATTR` is the attribute name and `VALUE` is the new value. `VALUE` is assumed to be a
+json encoded string, which means that you must have quotes (e.g., `--terragrunt-override-attr 'region="eu-west-1"'`).
+Additionally, note that `ATTR` can specify attributes within a nested block by specifying `<BLOCK>.<ATTR>`, where
+`<BLOCK>` is the block name.
+
+For example, let's say you had a `provider` block in a module that looked like this:
 
 ```hcl
 provider "aws" {
-  region = var.aws_region
+  region              = var.aws_region
+  allowed_account_ids = var.allowed_account_ids
   assume_role {
     role_arn = var.role_arn
   }
@@ -347,9 +351,12 @@ Both the `region` and `role_arn` parameters are set to dynamic values, which wil
 around it, run the following command:
 
 ```bash
+# NOTE: The single quotes around the args is to allow you to pass through the " character in the args via bash quoting
+# rules.
 terragrunt aws-provider-patch \
-  --terragrunt-override-attr region=eu-west-1 \
-  --terragrunt-override-attr assume_role.role_arn=""
+  --terragrunt-override-attr 'region="eu-west-1"' \
+  --terragrunt-override-attr 'assume_role.role_arn=""' \
+  --terragrunt-override-attr 'allowed_account_ids=["00000000"]'
 ```
 
 When you run the command above, Terragrunt will:
@@ -358,12 +365,14 @@ When you run the command above, Terragrunt will:
 1. Scan all the Terraform code in `.terraform/modules`, find AWS `provider` blocks, and for each one, hard-code:
     1. The `region` param to `"eu-west-1"`.
     1. The `role_arn` within the `assume_role` block to `""`.
+    1. The `allowed_account_ids` param to `["0000000"]`.
 
 The result will look like this:
 
 ```hcl
 provider "aws" {
-  region = "eu-west-1"
+  region              = "eu-west-1"
+  allowed_account_ids = ["0000000"]
   assume_role {
     role_arn = ""
   }
@@ -621,6 +630,7 @@ included directories with `terragrunt-include-dir`.
 ### terragrunt-include-external-dependencies
 
 **CLI Arg**: `--terragrunt-include-external-dependencies`
+**Environment Variable**: `TERRAGRUNT_INCLUDE_EXTERNAL_DEPENDENCIES`
 
 When passed in, include any external dependencies when running `*-all` without asking. Note that an external
 dependency is a dependency that is outside the current terragrunt working directory, and is not respective to the
@@ -638,7 +648,8 @@ When passed in, limit the number of modules that are run concurrently to this nu
 
 ### terragrunt-debug
 
-**CLI Arg**: `--terragrunt-debug`
+**CLI Arg**: `--terragrunt-debug`<br/>
+**Environment Variable**: `TERRAGRUNT_DEBUG`
 
 When passed in, Terragrunt will create a tfvars file that can be used to invoke the terraform module in the same way
 that Terragrunt invokes the module, so that you can debug issues with the terragrunt config. See
@@ -676,7 +687,7 @@ command to exit with exit code 1 if there are any files that are not formatted.
 **CLI Arg**: `--terragrunt-hclfmt-file`
 **Requires an argument**: `--terragrunt-hclfmt-file /path/to/terragrunt.hcl`
 
-When passed in, run `hclfmt` only on specified `*/terragrunt.hcl` file.
+When passed in, run `hclfmt` only on specified hcl file.
 
 
 ### terragrunt-override-attr

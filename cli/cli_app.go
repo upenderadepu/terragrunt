@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-multierror"
 	"github.com/mattn/go-zglob"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
@@ -206,7 +207,7 @@ COMMANDS:
    terragrunt-info       Emits limited terragrunt state on stdout and exits
    validate-inputs       Checks if the terragrunt configured inputs align with the terraform defined variables.
    graph-dependencies    Prints the terragrunt dependency graph to stdout
-   hclfmt                Recursively find terragrunt.hcl files and rewrite them into a canonical format.
+   hclfmt                Recursively find hcl files and rewrite them into a canonical format.
    aws-provider-patch    Overwrite settings on nested AWS providers to work around a Terraform bug (issue #13018)
    *                     Terragrunt forwards all other commands directly to Terraform
 
@@ -230,7 +231,7 @@ GLOBAL OPTIONS:
    terragrunt-exclude-dir                       Unix-style glob of directories to exclude when running *-all commands
    terragrunt-include-dir                       Unix-style glob of directories to include when running *-all commands
    terragrunt-check                             Enable check mode in the hclfmt command.
-   terragrunt-hclfmt-file                       The path to a single terragrunt.hcl file that the hclfmt command should run on.
+   terragrunt-hclfmt-file                       The path to a single hcl file that the hclfmt command should run on.
    terragrunt-override-attr                     A key=value attribute to override in a provider block as part of the aws-provider-patch command. May be specified multiple times.
    terragrunt-debug                             Write terragrunt-debug.tfvars to working folder to help root-cause issues.
    terragrunt-log-level                         Sets the logging level for Terragrunt. Supported levels: panic, fatal, error, warn (default), info, debug, trace.
@@ -359,7 +360,7 @@ func RunTerragrunt(terragruntOptions *options.TerragruntOptions) error {
 	terragruntOptionsClone := terragruntOptions.Clone(terragruntOptions.TerragruntConfigPath)
 	terragruntOptionsClone.TerraformCommand = CMD_TERRAGRUNT_READ_CONFIG
 
-	if err := processHooks(terragruntConfig.Terraform.GetAfterHooks(), terragruntOptionsClone); err != nil {
+	if err := processHooks(terragruntConfig.Terraform.GetAfterHooks(), terragruntOptionsClone, nil); err != nil {
 		return err
 	}
 
@@ -570,18 +571,18 @@ func shouldApplyAwsProviderPatch(terragruntOptions *options.TerragruntOptions) b
 	return util.ListContainsElement(terragruntOptions.TerraformCliArgs, CMD_AWS_PROVIDER_PATCH)
 }
 
-func processHooks(hooks []config.Hook, terragruntOptions *options.TerragruntOptions, previousExecError ...error) error {
+func processHooks(hooks []config.Hook, terragruntOptions *options.TerragruntOptions, previousExecErrors *multierror.Error) error {
 	if len(hooks) == 0 {
 		return nil
 	}
 
-	errorsOccurred := []error{}
+	var errorsOccured *multierror.Error
 
 	terragruntOptions.Logger.Debugf("Detected %d Hooks", len(hooks))
 
 	for _, curHook := range hooks {
-		allPreviousErrors := append(previousExecError, errorsOccurred...)
-		if shouldRunHook(curHook, terragruntOptions, allPreviousErrors...) {
+		allPreviousErrors := multierror.Append(previousExecErrors, errorsOccured)
+		if shouldRunHook(curHook, terragruntOptions, allPreviousErrors) {
 			terragruntOptions.Logger.Infof("Executing hook: %s", curHook.Name)
 			workingDir := ""
 			if curHook.WorkingDir != nil {
@@ -599,27 +600,26 @@ func processHooks(hooks []config.Hook, terragruntOptions *options.TerragruntOpti
 			)
 			if possibleError != nil {
 				terragruntOptions.Logger.Errorf("Error running hook %s with message: %s", curHook.Name, possibleError.Error())
-				errorsOccurred = append(errorsOccurred, possibleError)
+				errorsOccured = multierror.Append(errorsOccured, possibleError)
 			}
 
 		}
 	}
 
-	return errors.NewMultiError(errorsOccurred...)
+	return errorsOccured.ErrorOrNil()
 }
 
-func shouldRunHook(hook config.Hook, terragruntOptions *options.TerragruntOptions, previousExecErrors ...error) bool {
+func shouldRunHook(hook config.Hook, terragruntOptions *options.TerragruntOptions, previousExecErrors *multierror.Error) bool {
 	//if there's no previous error, execute command
 	//OR if a previous error DID happen AND we want to run anyways
 	//then execute.
 	//Skip execution if there was an error AND we care about errors
 
 	//resolves: https://github.com/gruntwork-io/terragrunt/issues/459
-	//by helping to filter out nil errors that were acting as false positives
-	//for the len(previousExecErrors) == 0 check that used to be here
-	multiError := errors.NewMultiError(previousExecErrors...)
+	hasErrors := previousExecErrors.ErrorOrNil() != nil
+	isCommandInHook := util.ListContainsElement(hook.Commands, terragruntOptions.TerraformCommand)
 
-	return util.ListContainsElement(hook.Commands, terragruntOptions.TerraformCommand) && (multiError == nil || (hook.RunOnError != nil && *hook.RunOnError))
+	return isCommandInHook && (!hasErrors || (hook.RunOnError != nil && *hook.RunOnError))
 }
 
 // Runs terraform with the given options and CLI args.
@@ -675,7 +675,7 @@ func runTerragruntWithConfig(originalTerragruntOptions *options.TerragruntOption
 			lockFileError = copyLockFile(terragruntOptions.WorkingDir, originalTerragruntOptions.WorkingDir, terragruntOptions.Logger)
 		}
 
-		return errors.NewMultiError(runTerraformError, lockFileError)
+		return multierror.Append(runTerraformError, lockFileError).ErrorOrNil()
 	})
 }
 
@@ -721,18 +721,22 @@ func copyLockFile(sourceFolder string, destinationFolder string, logger *logrus.
 // Run the given action function surrounded by hooks. That is, run the before hooks first, then, if there were no
 // errors, run the action, and finally, run the after hooks. Return any errors hit from the hooks or action.
 func runActionWithHooks(description string, terragruntOptions *options.TerragruntOptions, terragruntConfig *config.TerragruntConfig, action func() error) error {
-	beforeHookErrors := processHooks(terragruntConfig.Terraform.GetBeforeHooks(), terragruntOptions)
+	var allErrors *multierror.Error
+	beforeHookErrors := processHooks(terragruntConfig.Terraform.GetBeforeHooks(), terragruntOptions, allErrors)
+	allErrors = multierror.Append(allErrors, beforeHookErrors)
 
 	var actionErrors error
 	if beforeHookErrors == nil {
 		actionErrors = action()
+		allErrors = multierror.Append(allErrors, actionErrors)
 	} else {
 		terragruntOptions.Logger.Errorf("Errors encountered running before_hooks. Not running '%s'.", description)
 	}
 
-	postHookErrors := processHooks(terragruntConfig.Terraform.GetAfterHooks(), terragruntOptions, beforeHookErrors, actionErrors)
+	postHookErrors := processHooks(terragruntConfig.Terraform.GetAfterHooks(), terragruntOptions, allErrors)
+	allErrors = multierror.Append(allErrors, postHookErrors)
 
-	return errors.NewMultiError(beforeHookErrors, actionErrors, postHookErrors)
+	return allErrors.ErrorOrNil()
 }
 
 // The Terragrunt configuration can contain a set of inputs to pass to Terraform as environment variables. This method

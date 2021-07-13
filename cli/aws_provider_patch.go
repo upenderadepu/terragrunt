@@ -10,7 +10,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/mattn/go-zglob"
-	"github.com/zclconf/go-cty/cty"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 
 	"github.com/gruntwork-io/terragrunt/errors"
 	"github.com/gruntwork-io/terragrunt/options"
@@ -176,7 +176,10 @@ func patchAwsProviderInTerraformCode(terraformCode string, terraformFilePath str
 	for _, block := range hclFile.Body().Blocks() {
 		if block.Type() == "provider" && len(block.Labels()) == 1 && block.Labels()[0] == "aws" {
 			for key, value := range attributesToOverride {
-				attributeOverridden := overrideAttributeInBlock(block, key, value)
+				attributeOverridden, err := overrideAttributeInBlock(block, key, value)
+				if err != nil {
+					return string(hclFile.Bytes()), codeWasUpdated, err
+				}
 				codeWasUpdated = codeWasUpdated || attributeOverridden
 			}
 		}
@@ -230,15 +233,35 @@ func patchAwsProviderInTerraformCode(terraformCode string, terraformFilePath str
 // The result would be:
 //
 // provider "aws" {}
-func overrideAttributeInBlock(block *hclwrite.Block, key string, value string) bool {
+//
+// Returns an error if the provided value is not valid json.
+func overrideAttributeInBlock(block *hclwrite.Block, key string, value string) (bool, error) {
 	body, attr := traverseBlock(block, strings.Split(key, "."))
 	if body == nil || body.GetAttribute(attr) == nil {
 		// We didn't find an existing block or attribute, so there's nothing to override
-		return false
+		return false, nil
 	}
 
-	body.SetAttributeValue(attr, cty.StringVal(value))
-	return true
+	// The cty library requires concrete types, but since the value is user provided, we don't have a way to know the
+	// underlying type. Additionally, the provider block themselves don't give us the typing information either unless
+	// we maintain a mapping of all possible provider configurations (which is unmaintainable). To handle this, we
+	// assume the user provided input is json, and convert to cty that way.
+	valueBytes := []byte(value)
+	ctyType, err := ctyjson.ImpliedType(valueBytes)
+	if err != nil {
+		// Wrap error in a custom error type that has better error messaging to the user.
+		returnErr := TypeInferenceErr{value: value, underlyingErr: err}
+		return false, errors.WithStackTrace(returnErr)
+	}
+	ctyVal, err := ctyjson.Unmarshal(valueBytes, ctyType)
+	if err != nil {
+		// Wrap error in a custom error type that has better error messaging to the user.
+		returnErr := MalformedJSONValErr{value: value, underlyingErr: err}
+		return false, errors.WithStackTrace(returnErr)
+	}
+
+	body.SetAttributeValue(attr, ctyVal)
+	return true, nil
 }
 
 // Given a Terraform block and slice of keys, return the body of the block that is indicated by the keys, and the
@@ -289,4 +312,24 @@ type MissingOverrides string
 
 func (err MissingOverrides) Error() string {
 	return fmt.Sprintf("You must specify at least one provider attribute to override via the --%s option.", string(err))
+}
+
+type TypeInferenceErr struct {
+	value         string
+	underlyingErr error
+}
+
+func (err TypeInferenceErr) Error() string {
+	val := err.value
+	return fmt.Sprintf(`Could not determine underlying type of JSON string %s. This usually happens when the JSON string is malformed, or if the value is not properly quoted (e.g., "%s"). Underlying error: %s`, val, val, err.underlyingErr)
+}
+
+type MalformedJSONValErr struct {
+	value         string
+	underlyingErr error
+}
+
+func (err MalformedJSONValErr) Error() string {
+	val := err.value
+	return fmt.Sprintf(`Error unmarshaling JSON string %s. This usually happens when the JSON string is malformed, or if the value is not properly quoted (e.g., "%s"). Underlying error: %s`, val, val, err.underlyingErr)
 }

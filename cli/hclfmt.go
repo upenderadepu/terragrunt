@@ -8,16 +8,16 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/mattn/go-zglob"
 
-	"github.com/gruntwork-io/terragrunt/errors"
 	"github.com/gruntwork-io/terragrunt/options"
 	"github.com/gruntwork-io/terragrunt/util"
 )
 
-// runHCLFmt recursively looks for terragrunt.hcl files in the directory tree starting at workingDir, and formats them
+// runHCLFmt recursively looks for hcl files in the directory tree starting at workingDir, and formats them
 // based on the language style guides provided by Hashicorp. This is done using the official hcl2 library.
 func runHCLFmt(terragruntOptions *options.TerragruntOptions) error {
 
@@ -29,11 +29,11 @@ func runHCLFmt(terragruntOptions *options.TerragruntOptions) error {
 		if !filepath.IsAbs(targetFile) {
 			targetFile = util.JoinPath(workingDir, targetFile)
 		}
-		terragruntOptions.Logger.Infof("Formatting terragrunt.hcl file at: %s.", targetFile)
+		terragruntOptions.Logger.Infof("Formatting hcl file at: %s.", targetFile)
 		return formatTgHCL(terragruntOptions, targetFile)
 	}
 
-	terragruntOptions.Logger.Infof("Formatting terragrunt.hcl files from the directory tree %s.", terragruntOptions.WorkingDir)
+	terragruntOptions.Logger.Infof("Formatting hcl files from the directory tree %s.", terragruntOptions.WorkingDir)
 	// zglob normalizes paths to "/"
 	tgHclFiles, err := zglob.Glob(util.JoinPath(workingDir, "**", "*.hcl"))
 	if err != nil {
@@ -50,20 +50,20 @@ func runHCLFmt(terragruntOptions *options.TerragruntOptions) error {
 		}
 	}
 
-	terragruntOptions.Logger.Debugf("Found %d terragrunt.hcl files", len(filteredTgHclFiles))
+	terragruntOptions.Logger.Debugf("Found %d hcl files", len(filteredTgHclFiles))
 
-	formatErrors := []error{}
+	var formatErrors *multierror.Error
 	for _, tgHclFile := range filteredTgHclFiles {
 		err := formatTgHCL(terragruntOptions, tgHclFile)
 		if err != nil {
-			formatErrors = append(formatErrors, err)
+			formatErrors = multierror.Append(formatErrors, err)
 		}
 	}
 
-	return errors.NewMultiError(formatErrors...)
+	return formatErrors.ErrorOrNil()
 }
 
-// formatTgHCL uses the hcl2 library to format the terragrunt.hcl file. This will attempt to parse the HCL file first to
+// formatTgHCL uses the hcl2 library to format the hcl file. This will attempt to parse the HCL file first to
 // ensure that there are no syntax errors, before attempting to format it.
 func formatTgHCL(terragruntOptions *options.TerragruntOptions, tgHclFile string) error {
 	terragruntOptions.Logger.Infof("Formatting %s", tgHclFile)
@@ -99,7 +99,7 @@ func formatTgHCL(terragruntOptions *options.TerragruntOptions, tgHclFile string)
 	return ioutil.WriteFile(tgHclFile, newContents, info.Mode())
 }
 
-// checkErrors takes in the contents of a terragrunt.hcl file and looks for syntax errors.
+// checkErrors takes in the contents of a hcl file and looks for syntax errors.
 func checkErrors(contents []byte, tgHclFile string) error {
 	parser := hclparse.NewParser()
 	_, diags := parser.ParseHCL(contents, tgHclFile)

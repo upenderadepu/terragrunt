@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/sts"
 	terraws "github.com/gruntwork-io/terratest/modules/aws"
 	"github.com/gruntwork-io/terratest/modules/git"
+	"github.com/hashicorp/go-multierror"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/iterator"
@@ -37,7 +38,6 @@ import (
 	"github.com/gruntwork-io/terragrunt/cli/tfsource"
 	"github.com/gruntwork-io/terragrunt/codegen"
 	"github.com/gruntwork-io/terragrunt/config"
-	"github.com/gruntwork-io/terragrunt/configstack"
 	terragruntDynamoDb "github.com/gruntwork-io/terragrunt/dynamodb"
 	"github.com/gruntwork-io/terragrunt/errors"
 	"github.com/gruntwork-io/terragrunt/options"
@@ -640,7 +640,50 @@ func TestTerragruntWorksWithIncludes(t *testing.T) {
 
 	tmpTerragruntConfigPath := createTmpTerragruntConfigWithParentAndChild(t, TEST_FIXTURE_INCLUDE_PATH, TEST_FIXTURE_INCLUDE_CHILD_REL_PATH, s3BucketName, config.DefaultTerragruntConfigPath, config.DefaultTerragruntConfigPath)
 
-	runTerragrunt(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-config %s --terragrunt-working-dir %s", tmpTerragruntConfigPath, childPath))
+	runTerragrunt(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-config %s --terragrunt-working-dir %s", tmpTerragruntConfigPath, childPath))
+
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+	err := runTerragruntCommand(t, fmt.Sprintf("terragrunt output -no-color -json --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-config %s --terragrunt-working-dir %s", tmpTerragruntConfigPath, childPath), &stdout, &stderr)
+	require.NoError(t, err)
+
+	outputs := map[string]TerraformOutput{}
+	require.NoError(t, json.Unmarshal([]byte(stdout.String()), &outputs))
+	remoteStateOut := map[string]interface{}{}
+	require.NoError(t, json.Unmarshal([]byte(outputs["reflect"].Value.(string)), &remoteStateOut))
+	assert.Equal(
+		t,
+		remoteStateOut,
+		map[string]interface{}{
+			"backend":                         "s3",
+			"disable_init":                    false,
+			"disable_dependency_optimization": false,
+			"generate":                        nil,
+			"config": map[string]interface{}{
+				"encrypt": true,
+				"bucket":  s3BucketName,
+				"key":     "qa/my-app/terraform.tfstate",
+				"region":  "us-west-2",
+			},
+		},
+	)
+}
+
+func TestTerragruntWorksWithIncludeLocals(t *testing.T) {
+	t.Parallel()
+
+	childPath := util.JoinPath("fixture-include-expose", "child")
+	cleanupTerraformFolder(t, childPath)
+	runTerragrunt(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir %s", childPath))
+
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+	err := runTerragruntCommand(t, fmt.Sprintf("terragrunt output -no-color -json --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir %s", childPath), &stdout, &stderr)
+	require.NoError(t, err)
+
+	outputs := map[string]TerraformOutput{}
+	require.NoError(t, json.Unmarshal([]byte(stdout.String()), &outputs))
+	assert.Equal(t, "us-west-1-test", outputs["region"].Value.(string))
 }
 
 func TestTerragruntWorksWithSingleJsonConfig(t *testing.T) {
@@ -1316,7 +1359,7 @@ func TestAwsProviderPatch(t *testing.T) {
 
 	assert.NoError(
 		t,
-		runTerragruntCommand(t, fmt.Sprintf("terragrunt aws-provider-patch --terragrunt-override-attr region=eu-west-1 --terragrunt-working-dir %s --terragrunt-log-level debug", modulePath), os.Stdout, stderr),
+		runTerragruntCommand(t, fmt.Sprintf("terragrunt aws-provider-patch --terragrunt-override-attr region=\"eu-west-1\" --terragrunt-override-attr allowed_account_ids=[\"00000000000\"] --terragrunt-working-dir %s --terragrunt-log-level debug", modulePath), os.Stdout, stderr),
 	)
 	t.Log(stderr.String())
 
@@ -1499,7 +1542,7 @@ func TestPreventDestroyDependencies(t *testing.T) {
 
 	if assert.Error(t, err) {
 		underlying := errors.Unwrap(err)
-		assert.IsType(t, configstack.MultiError{}, underlying)
+		assert.IsType(t, &multierror.Error{}, underlying)
 	}
 
 	// Check that modules C, D and E were deleted and modules A and B weren't.
@@ -1708,7 +1751,7 @@ func TestPreventDestroyDependenciesIncludedConfig(t *testing.T) {
 
 	if assert.Error(t, err) {
 		underlying := errors.Unwrap(err)
-		assert.IsType(t, configstack.MultiError{}, underlying)
+		assert.IsType(t, &multierror.Error{}, underlying)
 	}
 
 	// Check that modules C, D and E were deleted and modules A and B weren't.
@@ -2123,6 +2166,7 @@ func TestYamlDecodeRegressions(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(stdout.String()), &outputs))
 	assert.Equal(t, outputs["test1"].Value, "003")
 	assert.Equal(t, outputs["test2"].Value, "1.00")
+	assert.Equal(t, outputs["test3"].Value, "0ba")
 }
 
 // We test the path with remote_state blocks by:
