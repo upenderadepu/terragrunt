@@ -48,23 +48,25 @@ import (
 	"github.com/gruntwork-io/terragrunt/codegen"
 	"github.com/gruntwork-io/terragrunt/config"
 	terragruntDynamoDb "github.com/gruntwork-io/terragrunt/dynamodb"
+	"github.com/gruntwork-io/terragrunt/internal/view/diagnostic"
 	"github.com/gruntwork-io/terragrunt/options"
 	"github.com/gruntwork-io/terragrunt/remote"
 	"github.com/gruntwork-io/terragrunt/shell"
 	"github.com/gruntwork-io/terragrunt/util"
 )
 
-// @SONAR_STOP@
-
 // hard-code this to match the test fixture for now
 const (
 	TERRAFORM_REMOTE_STATE_S3_REGION                                         = "us-west-2"
 	TERRAFORM_REMOTE_STATE_GCP_REGION                                        = "eu"
 	TEST_FIXTURE_PATH                                                        = "fixture/"
+	TEST_FIXTURE_HCLVALIDATE                                                 = "fixture-hclvalidate"
+	TEST_FIXTURE_EXCLUDES_FILE                                               = "fixutre-excludes-file"
 	TEST_FIXTURE_INIT_ONCE                                                   = "fixture-init-once"
 	TEST_FIXTURE_PROVIDER_CACHE_MULTIPLE_PLATFORMS                           = "fixture-provider-cache/multiple-platforms"
 	TEST_FIXTURE_PROVIDER_CACHE_DIRECT                                       = "fixture-provider-cache/direct"
-	TEST_FIXTURE_PROVIDER_CACHE_MIRROR                                       = "fixture-provider-cache/mirror"
+	TEST_FIXTURE_PROVIDER_CACHE_NETWORK_MIRROR                               = "fixture-provider-cache/network-mirror"
+	TEST_FIXTURE_PROVIDER_CACHE_FILESYSTEM_MIRROR                            = "fixture-provider-cache/filesystem-mirror"
 	TEST_FIXTURE_DESTROY_ORDER                                               = "fixture-destroy-order"
 	TEST_FIXTURE_CODEGEN_PATH                                                = "fixture-codegen"
 	TEST_FIXTURE_GCS_PATH                                                    = "fixture-gcs/"
@@ -213,7 +215,174 @@ const (
 	fixtureDownload = "fixture-download"
 )
 
+func TestTerragruntExcludesFile(t *testing.T) {
+	t.Parallel()
+
+	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_EXCLUDES_FILE, ".terragrunt-excludes")
+	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_EXCLUDES_FILE)
+
+	testCases := []struct {
+		flags          string
+		expectedOutput []string
+	}{
+		{
+			"",
+			[]string{`value = "b"`, `value = "d"`},
+		},
+		{
+			"--terragrunt-excludes-file ./excludes-file-pass-as-flag",
+			[]string{`value = "a"`, `value = "c"`},
+		},
+	}
+
+	for i, testCase := range testCases {
+		testCase := testCase
+
+		t.Run(fmt.Sprintf("testCase-%d", i), func(t *testing.T) {
+			cleanupTerraformFolder(t, TEST_FIXTURE_EXCLUDES_FILE)
+
+			runTerragrunt(t, fmt.Sprintf("terragrunt run-all apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s %s", rootPath, testCase.flags))
+
+			stdout, _, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt run-all output --terragrunt-non-interactive --terragrunt-working-dir %s %s", rootPath, testCase.flags))
+			require.NoError(t, err)
+
+			actualOutput := strings.Split(strings.TrimSpace(stdout), "\n")
+			assert.ElementsMatch(t, testCase.expectedOutput, actualOutput)
+		})
+	}
+}
+
+func TestHclvalidateDiagnostic(t *testing.T) {
+	t.Parallel()
+
+	cleanupTerraformFolder(t, TEST_FIXTURE_HCLVALIDATE)
+	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_HCLVALIDATE)
+	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_HCLVALIDATE)
+
+	expectedDiags := diagnostic.Diagnostics{
+		&diagnostic.Diagnostic{
+			Severity: diagnostic.DiagnosticSeverity(hcl.DiagError),
+			Summary:  "Invalid expression",
+			Detail:   "Expected the start of an expression, but found an invalid expression token.",
+			Range: &diagnostic.Range{
+				Filename: filepath.Join(rootPath, "second/a/terragrunt.hcl"),
+				Start:    diagnostic.Pos{Line: 2, Column: 6, Byte: 14},
+				End:      diagnostic.Pos{Line: 3, Column: 1, Byte: 15},
+			},
+			Snippet: &diagnostic.Snippet{
+				Context:              "locals",
+				Code:                 "  t =\n}",
+				StartLine:            2,
+				HighlightStartOffset: 5,
+				HighlightEndOffset:   6,
+			},
+		},
+		&diagnostic.Diagnostic{
+			Severity: diagnostic.DiagnosticSeverity(hcl.DiagError),
+			Summary:  "Unsupported attribute",
+			Detail:   "This object does not have an attribute named \"outputs\".",
+			Range: &diagnostic.Range{
+				Filename: filepath.Join(rootPath, "second/c/terragrunt.hcl"),
+				Start:    diagnostic.Pos{Line: 6, Column: 19, Byte: 86},
+				End:      diagnostic.Pos{Line: 6, Column: 27, Byte: 94},
+			},
+			Snippet: &diagnostic.Snippet{
+				Context:              "",
+				Code:                 "  c = dependency.a.outputs.z",
+				StartLine:            6,
+				HighlightStartOffset: 18,
+				HighlightEndOffset:   26,
+				Values:               []diagnostic.ExpressionValue{diagnostic.ExpressionValue{Traversal: "dependency.a", Statement: "is object with no attributes"}},
+			},
+		},
+		&diagnostic.Diagnostic{
+			Severity: diagnostic.DiagnosticSeverity(hcl.DiagError),
+			Summary:  "Missing required argument",
+			Detail:   "The argument \"config_path\" is required, but no definition was found.",
+			Range: &diagnostic.Range{
+				Filename: filepath.Join(rootPath, "second/c/terragrunt.hcl"),
+				Start:    diagnostic.Pos{Line: 16, Column: 16, Byte: 219},
+				End:      diagnostic.Pos{Line: 16, Column: 17, Byte: 220},
+			},
+			Snippet: &diagnostic.Snippet{
+				Context:              "dependency \"iam\"",
+				Code:                 "dependency iam {",
+				StartLine:            16,
+				HighlightStartOffset: 15,
+				HighlightEndOffset:   16,
+			},
+		},
+		&diagnostic.Diagnostic{
+			Severity: diagnostic.DiagnosticSeverity(hcl.DiagError),
+			Summary:  "Can't evaluate expression",
+			Detail:   "You can only reference to other local variables here, but it looks like you're referencing something else (\"dependency\" is not defined)",
+			Range: &diagnostic.Range{
+				Filename: filepath.Join(rootPath, "second/c/terragrunt.hcl"),
+				Start:    diagnostic.Pos{Line: 12, Column: 9, Byte: 149},
+				End:      diagnostic.Pos{Line: 12, Column: 21, Byte: 161},
+			},
+			Snippet: &diagnostic.Snippet{
+				Context:              "locals",
+				Code:                 "  ddd = dependency.d",
+				StartLine:            12,
+				HighlightStartOffset: 8,
+				HighlightEndOffset:   20,
+			},
+		},
+		&diagnostic.Diagnostic{
+			Severity: diagnostic.DiagnosticSeverity(hcl.DiagError),
+			Summary:  "Can't evaluate expression",
+			Detail:   "You can only reference to other local variables here, but it looks like you're referencing something else (\"dependency\" is not defined)",
+			Range: &diagnostic.Range{
+				Filename: filepath.Join(rootPath, "second/c/terragrunt.hcl"),
+				Start:    diagnostic.Pos{Line: 10, Column: 9, Byte: 117},
+				End:      diagnostic.Pos{Line: 10, Column: 31, Byte: 139},
+			},
+			Snippet: &diagnostic.Snippet{
+				Context:              "locals",
+				Code:                 "  vvv = dependency.a.outputs.z",
+				StartLine:            10,
+				HighlightStartOffset: 8,
+				HighlightEndOffset:   30,
+			},
+		},
+	}
+
+	stdout, _, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt hclvalidate --terragrunt-working-dir %s --terragrunt-hclvalidate-json", rootPath))
+	require.NoError(t, err)
+
+	var actualDiags diagnostic.Diagnostics
+
+	err = json.Unmarshal([]byte(strings.TrimSpace(stdout)), &actualDiags)
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, expectedDiags, actualDiags)
+}
+
+func TestHclvalidateInvalidConfigPath(t *testing.T) {
+	cleanupTerraformFolder(t, TEST_FIXTURE_HCLVALIDATE)
+	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_HCLVALIDATE)
+	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_HCLVALIDATE)
+
+	expectedPaths := []string{
+		filepath.Join(rootPath, "second/a/terragrunt.hcl"),
+		filepath.Join(rootPath, "second/c/terragrunt.hcl"),
+	}
+
+	stdout, _, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt hclvalidate --terragrunt-working-dir %s --terragrunt-hclvalidate-json --terragrunt-hclvalidate-show-config-path", rootPath))
+	require.NoError(t, err)
+
+	var actualPaths []string
+
+	err = json.Unmarshal([]byte(strings.TrimSpace(stdout)), &actualPaths)
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, expectedPaths, actualPaths)
+}
+
 func TestTerragruntProviderCacheMultiplePlatforms(t *testing.T) {
+	t.Parallel()
+
 	cleanupTerraformFolder(t, TEST_FIXTURE_PROVIDER_CACHE_MULTIPLE_PLATFORMS)
 	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_PROVIDER_CACHE_MULTIPLE_PLATFORMS)
 	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_PROVIDER_CACHE_MULTIPLE_PLATFORMS)
@@ -530,6 +699,9 @@ func TestTerragruntBeforeAndAfterHook(t *testing.T) {
 	t.Logf("output: %s", output)
 
 	assert.Equal(t, 1, strings.Count(output, "AFTER_TERRAGRUNT_READ_CONFIG"), "Hooks on terragrunt-read-config command executed more than once")
+
+	expectedHookOutput := fmt.Sprintf("TF_PATH=%s COMMAND=terragrunt-read-config HOOK_NAME=after_hook_3", wrappedBinary())
+	assert.Equal(t, 1, strings.Count(output, expectedHookOutput))
 
 	assert.NoError(t, beforeException)
 	assert.NoError(t, afterException)
@@ -1242,7 +1414,7 @@ func TestExitCode(t *testing.T) {
 	modulePath := util.JoinPath(rootPath, TEST_FIXTURE_EXIT_CODE)
 	err := runTerragruntCommand(t, fmt.Sprintf("terragrunt plan -detailed-exitcode --terragrunt-non-interactive --terragrunt-working-dir %s", modulePath), os.Stdout, os.Stderr)
 
-	exitCode, exitCodeErr := shell.GetExitCode(err)
+	exitCode, exitCodeErr := util.GetExitCode(err)
 	assert.NoError(t, exitCodeErr)
 	assert.Equal(t, 2, exitCode)
 }
@@ -3596,16 +3768,16 @@ func TestReadTerragruntConfigFull(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(outputs["dependencies"].Value.(string)), &depsOut))
 	assert.Equal(
 		t,
-		depsOut,
 		map[string]interface{}{
 			"paths": []interface{}{"../../fixture"},
 		},
+		depsOut,
 	)
+
 	generateOut := map[string]interface{}{}
 	require.NoError(t, json.Unmarshal([]byte(outputs["generate"].Value.(string)), &generateOut))
 	assert.Equal(
 		t,
-		generateOut,
 		map[string]interface{}{
 			"provider": map[string]interface{}{
 				"path":              "provider.tf",
@@ -3620,12 +3792,12 @@ func TestReadTerragruntConfigFull(t *testing.T) {
 `,
 			},
 		},
+		generateOut,
 	)
 	remoteStateOut := map[string]interface{}{}
 	require.NoError(t, json.Unmarshal([]byte(outputs["remote_state"].Value.(string)), &remoteStateOut))
 	assert.Equal(
 		t,
-		remoteStateOut,
 		map[string]interface{}{
 			"backend":                         "local",
 			"disable_init":                    false,
@@ -3633,12 +3805,12 @@ func TestReadTerragruntConfigFull(t *testing.T) {
 			"generate":                        map[string]interface{}{"path": "backend.tf", "if_exists": "overwrite_terragrunt"},
 			"config":                          map[string]interface{}{"path": "foo.tfstate"},
 		},
+		remoteStateOut,
 	)
 	terraformOut := map[string]interface{}{}
 	require.NoError(t, json.Unmarshal([]byte(outputs["terraformtg"].Value.(string)), &terraformOut))
 	assert.Equal(
 		t,
-		terraformOut,
 		map[string]interface{}{
 			"source":          "./delorean",
 			"include_in_copy": []interface{}{"time_machine.*"},
@@ -3676,6 +3848,7 @@ func TestReadTerragruntConfigFull(t *testing.T) {
 			},
 			"error_hook": map[string]interface{}{},
 		},
+		terraformOut,
 	)
 }
 
@@ -4304,7 +4477,7 @@ func runTerragruntRedirectOutput(t *testing.T, command string, writer io.Writer,
 	}
 }
 
-func copyEnvironment(t *testing.T, environmentPath string) string {
+func copyEnvironment(t *testing.T, environmentPath string, includeInCopy ...string) string {
 	tmpDir, err := os.MkdirTemp("", "terragrunt-test")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir due to error: %v", err)
@@ -4312,7 +4485,7 @@ func copyEnvironment(t *testing.T, environmentPath string) string {
 
 	t.Logf("Copying %s to %s", environmentPath, tmpDir)
 
-	require.NoError(t, util.CopyFolderContents(environmentPath, util.JoinPath(tmpDir, environmentPath), ".terragrunt-test", nil))
+	require.NoError(t, util.CopyFolderContents(environmentPath, util.JoinPath(tmpDir, environmentPath), ".terragrunt-test", includeInCopy))
 
 	return tmpDir
 }
@@ -4907,6 +5080,39 @@ func TestSopsDecryptedCorrectly(t *testing.T) {
 	stderr := bytes.Buffer{}
 
 	err := runTerragruntCommand(t, fmt.Sprintf("terragrunt output -no-color -json --terragrunt-non-interactive --terragrunt-working-dir %s", rootPath), &stdout, &stderr)
+	require.NoError(t, err)
+
+	outputs := map[string]TerraformOutput{}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &outputs))
+
+	assert.Equal(t, outputs["json_bool_array"].Value, []interface{}{true, false})
+	assert.Equal(t, outputs["json_string_array"].Value, []interface{}{"example_value1", "example_value2"})
+	assert.Equal(t, outputs["json_number"].Value, 1234.56789)
+	assert.Equal(t, outputs["json_string"].Value, "example_value")
+	assert.Equal(t, outputs["json_hello"].Value, "Welcome to SOPS! Edit this file as you please!")
+	assert.Equal(t, outputs["yaml_bool_array"].Value, []interface{}{true, false})
+	assert.Equal(t, outputs["yaml_string_array"].Value, []interface{}{"example_value1", "example_value2"})
+	assert.Equal(t, outputs["yaml_number"].Value, 1234.5679)
+	assert.Equal(t, outputs["yaml_string"].Value, "example_value")
+	assert.Equal(t, outputs["yaml_hello"].Value, "Welcome to SOPS! Edit this file as you please!")
+	assert.Equal(t, outputs["text_value"].Value, "Raw Secret Example")
+	assert.Contains(t, outputs["env_value"].Value, "DB_PASSWORD=tomato")
+	assert.Contains(t, outputs["ini_value"].Value, "password = potato")
+}
+
+func TestSopsDecryptedCorrectlyRunAll(t *testing.T) {
+	t.Parallel()
+
+	cleanupTerraformFolder(t, TEST_FIXTURE_SOPS)
+	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_SOPS)
+	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_SOPS)
+
+	runTerragrunt(t, fmt.Sprintf("terragrunt run-all apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s/.. --terragrunt-include-dir %s", rootPath, TEST_FIXTURE_SOPS))
+
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+
+	err := runTerragruntCommand(t, fmt.Sprintf("terragrunt run-all output -no-color -json --terragrunt-non-interactive --terragrunt-working-dir %s/.. --terragrunt-include-dir %s", rootPath, TEST_FIXTURE_SOPS), &stdout, &stderr)
 	require.NoError(t, err)
 
 	outputs := map[string]TerraformOutput{}
@@ -6314,7 +6520,7 @@ func TestTerragruntPrintAwsErrors(t *testing.T) {
 	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_S3_ERRORS)
 	cleanupTerraformFolder(t, rootPath)
 
-	s3BucketName := "test-tg-2023-01"
+	s3BucketName := "test-tg-2023-02"
 	lockTableName := fmt.Sprintf("terragrunt-test-locks-%s", strings.ToLower(uniqueId()))
 
 	tmpTerragruntConfigFile := util.JoinPath(rootPath, "terragrunt.hcl")
@@ -7188,6 +7394,25 @@ func TestTerragruntLogSopsErrors(t *testing.T) {
 	require.Contains(t, errorOut, "error base64-decoding encrypted data key: illegal base64 data at input byte")
 }
 
+func TestGetRepoRootCaching(t *testing.T) {
+	t.Parallel()
+	cleanupTerraformFolder(t, TEST_FIXTURE_GET_REPO_ROOT)
+	tmpEnvPath, _ := filepath.EvalSymlinks(copyEnvironment(t, TEST_FIXTURE_GET_REPO_ROOT))
+	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_REPO_ROOT)
+
+	gitOutput, err := exec.Command("git", "init", rootPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Error initializing git repo: %v\n%s", err, string(gitOutput))
+	}
+
+	stdout, stderr, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt run-all plan --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir %s", rootPath))
+	require.NoError(t, err)
+
+	output := fmt.Sprintf("%s %s", stdout, stderr)
+	count := strings.Count(output, "git show-toplevel result")
+	assert.Equal(t, 1, count)
+}
+
 func validateOutput(t *testing.T, outputs map[string]TerraformOutput, key string, value interface{}) {
 	t.Helper()
 	output, hasPlatform := outputs[key]
@@ -7226,5 +7451,3 @@ func findFilesWithExtension(dir string, ext string) ([]string, error) {
 
 	return files, err
 }
-
-// @SONAR_START@

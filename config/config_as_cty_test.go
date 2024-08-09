@@ -23,6 +23,10 @@ func TestTerragruntConfigAsCtyDrift(t *testing.T) {
 	mockOutputsAllowedTerraformCommands := []string{"init"}
 	dependentModulesPath := []*string{&testSource}
 	testConfig := TerragruntConfig{
+		Engine: &EngineConfig{
+			Source: "github.com/acme/terragrunt-plugin-custom-opentofu",
+			Meta:   &cty.Value{},
+		},
 		Catalog: &CatalogConfig{
 			URLs: []string{
 				"repo/path",
@@ -84,10 +88,10 @@ func TestTerragruntConfigAsCtyDrift(t *testing.T) {
 			"quote": "the answer is 42",
 		},
 		DependentModulesPath: dependentModulesPath,
-		TerragruntDependencies: []Dependency{
+		TerragruntDependencies: Dependencies{
 			{
 				Name:                                "foo",
-				ConfigPath:                          "foo",
+				ConfigPath:                          cty.StringVal("foo"),
 				SkipOutputs:                         &testTrue,
 				MockOutputs:                         &mockOutputs,
 				MockOutputsAllowedTerraformCommands: &mockOutputsAllowedTerraformCommands,
@@ -234,6 +238,8 @@ func terragruntConfigStructFieldToMapKey(t *testing.T, fieldName string) (string
 		return "retry_sleep_interval_sec", true
 	case "DependentModulesPath":
 		return "dependent_modules", true
+	case "Engine":
+		return "engine", true
 	default:
 		t.Fatalf("Unknown struct property: %s", fieldName)
 		// This should not execute

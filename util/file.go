@@ -1,6 +1,8 @@
 package util
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/gob"
 	"io"
 	"os"
@@ -23,6 +25,7 @@ const (
 	TerragruntCacheDir    = ".terragrunt-cache"
 	DefaultBoilerplateDir = ".boilerplate"
 	TfFileExtension       = ".tf"
+	ChecksumReadBlock     = 8192
 )
 
 // FileOrData will read the contents of the data of the given arg if it is a file, and otherwise return the contents by
@@ -657,4 +660,83 @@ func GetTempDir() (string, error) {
 	}
 
 	return tempDir, nil
+}
+
+// GetExcludeDirsFromFile returns a list of directories from the given filename, where each directory path starts on a new line.
+func GetExcludeDirsFromFile(baseDir, filename string) ([]string, error) {
+	filename, err := CanonicalPath(filename, baseDir)
+	if err != nil {
+		return nil, err
+	}
+
+	if !FileExists(filename) || !IsFile(filename) {
+		return nil, nil
+	}
+
+	content, err := ReadFileAsString(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	var dirs []string
+
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	for _, dir := range lines {
+		if dir := strings.TrimSpace(dir); dir == "" || strings.HasPrefix(dir, "#") {
+			continue
+		}
+
+		newDirs, err := GlobCanonicalPath(baseDir, dir)
+		if err != nil {
+			return nil, err
+		}
+
+		dirs = append(dirs, newDirs...)
+	}
+
+	return dirs, nil
+}
+
+// MatchSha256Checksum returns the SHA256 checksum for the given file and filename.
+func MatchSha256Checksum(file, filename []byte) []byte {
+	var checksum []byte
+	for _, line := range bytes.Split(file, []byte("\n")) {
+		parts := bytes.Fields(line)
+		if len(parts) > 1 && bytes.Equal(parts[1], filename) {
+			checksum = parts[0]
+			break
+		}
+	}
+	if checksum == nil {
+		return nil
+	}
+
+	return checksum
+}
+
+// FileSHA256 calculates the SHA256 hash of the file at the given path.
+func FileSHA256(filePath string) ([]byte, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, errors.WithStackTrace(err)
+	}
+	defer file.Close() //nolint:errcheck
+
+	hash := sha256.New()
+	buffer := make([]byte, ChecksumReadBlock)
+	for {
+		n, err := file.Read(buffer)
+		if err != nil && err != io.EOF {
+			return nil, errors.WithStackTrace(err)
+		}
+		if n == 0 {
+			break
+		}
+
+		if _, err := hash.Write(buffer[:n]); err != nil {
+			return nil, errors.WithStackTrace(err)
+		}
+	}
+
+	return hash.Sum(nil), nil
 }

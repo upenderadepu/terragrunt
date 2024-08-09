@@ -37,6 +37,14 @@ func TerragruntConfigAsCty(config *TerragruntConfig) (cty.Value, error) {
 		output[MetadataCatalog] = catalogConfigCty
 	}
 
+	engineConfigCty, err := engineConfigAsCty(config.Engine)
+	if err != nil {
+		return cty.NilVal, err
+	}
+	if engineConfigCty != cty.NilVal {
+		output[MetadataEngine] = engineConfigCty
+	}
+
 	terraformConfigCty, err := terraformConfigAsCty(config.Terraform)
 	if err != nil {
 		return cty.NilVal, err
@@ -382,6 +390,15 @@ type ctyCatalogConfig struct {
 	URLs []string `cty:"urls"`
 }
 
+// ctyEngineConfig is an alternate representation of EngineConfig that converts internal blocks into a map that
+// maps the name to the underlying struct, as opposed to a list representation.
+type ctyEngineConfig struct {
+	Source  string    `cty:"source"`
+	Version string    `cty:"version"`
+	Type    string    `cty:"type"`
+	Meta    cty.Value `cty:"meta"`
+}
+
 // Serialize CatalogConfig to a cty Value, but with maps instead of lists for the blocks.
 func catalogConfigAsCty(config *CatalogConfig) (cty.Value, error) {
 	if config == nil {
@@ -390,6 +407,34 @@ func catalogConfigAsCty(config *CatalogConfig) (cty.Value, error) {
 
 	configCty := ctyCatalogConfig{
 		URLs: config.URLs,
+	}
+
+	return goTypeToCty(configCty)
+}
+
+// Serialize engineConfigAsCty to a cty Value, but with maps instead of lists for the blocks.
+func engineConfigAsCty(config *EngineConfig) (cty.Value, error) {
+	if config == nil {
+		return cty.NilVal, nil
+	}
+
+	ctyMetaVal, err := convertToCtyWithJson(config.Meta)
+	if err != nil {
+		return cty.NilVal, err
+	}
+
+	var v, t string
+	if config.Version != nil {
+		v = *config.Version
+	}
+	if config.Type != nil {
+		t = *config.Type
+	}
+	configCty := ctyEngineConfig{
+		Source:  config.Source,
+		Version: v,
+		Type:    t,
+		Meta:    ctyMetaVal,
 	}
 
 	return goTypeToCty(configCty)
@@ -465,7 +510,7 @@ func remoteStateAsCty(remoteState *remote.RemoteState) (cty.Value, error) {
 }
 
 // Serialize the list of dependency blocks to a cty Value as a map that maps the block names to the cty representation.
-func dependencyBlocksAsCty(dependencyBlocks []Dependency) (cty.Value, error) {
+func dependencyBlocksAsCty(dependencyBlocks Dependencies) (cty.Value, error) {
 	out := map[string]cty.Value{}
 	for _, block := range dependencyBlocks {
 		blockCty, err := goTypeToCty(block)

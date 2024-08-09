@@ -86,16 +86,17 @@ func RunWithTarget(ctx context.Context, opts *options.TerragruntOptions, target 
 }
 
 func runTerraform(ctx context.Context, terragruntOptions *options.TerragruntOptions, target *Target) error {
-	if err := checkVersionConstraints(ctx, terragruntOptions); err != nil {
-		return target.runErrorCallback(terragruntOptions, nil, err)
-	}
-
+	// We need to get the credentials from auth-provider-cmd at the very beginning, since the locals block may contain `get_aws_account_id()` func.
 	credsGetter := creds.NewGetter()
 	if err := credsGetter.ObtainAndUpdateEnvIfNecessary(ctx, terragruntOptions, externalcmd.NewProvider(terragruntOptions)); err != nil {
 		return err
 	}
 
-	terragruntConfig, err := config.ReadTerragruntConfig(terragruntOptions)
+	if err := checkVersionConstraints(ctx, terragruntOptions); err != nil {
+		return target.runErrorCallback(terragruntOptions, nil, err)
+	}
+
+	terragruntConfig, err := config.ReadTerragruntConfig(ctx, terragruntOptions, config.DefaultParserOptions(terragruntOptions))
 	if err != nil {
 		return target.runErrorCallback(terragruntOptions, terragruntConfig, err)
 	}
@@ -103,6 +104,13 @@ func runTerraform(ctx context.Context, terragruntOptions *options.TerragruntOpti
 	if target.isPoint(TargetPointParseConfig) {
 		return target.runCallback(ctx, terragruntOptions, terragruntConfig)
 	}
+
+	// fetch engine options from the config
+	engine, err := terragruntConfig.EngineOptions()
+	if err != nil {
+		return target.runErrorCallback(terragruntOptions, terragruntConfig, err)
+	}
+	terragruntOptions.Engine = engine
 
 	terragruntOptionsClone := terragruntOptions.Clone(terragruntOptions.TerragruntConfigPath)
 	terragruntOptionsClone.TerraformCommand = CommandNameTerragruntReadConfig
@@ -432,7 +440,7 @@ func runTerraformWithRetry(ctx context.Context, terragruntOptions *options.Terra
 }
 
 // isRetryable checks whether there was an error and if the output matches any of the configured RetryableErrors
-func isRetryable(opts *options.TerragruntOptions, out *shell.CmdOutput) bool {
+func isRetryable(opts *options.TerragruntOptions, out *util.CmdOutput) bool {
 	if !opts.AutoRetry {
 		return false
 	}

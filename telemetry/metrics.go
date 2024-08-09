@@ -10,7 +10,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 
 	"github.com/gruntwork-io/go-commons/env"
-	"github.com/gruntwork-io/terragrunt/options"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -19,7 +18,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 type metricsExporterType string
@@ -39,7 +38,7 @@ var metricNameCleanPattern = regexp.MustCompile(`[^A-Za-z0-9_.-/]`)
 var multipleUnderscoresPattern = regexp.MustCompile(`_+`)
 
 // Time - collect time for function execution
-func Time(ctx context.Context, opts *options.TerragruntOptions, name string, attrs map[string]interface{}, fn func(childCtx context.Context) error) error {
+func Time(ctx context.Context, name string, attrs map[string]interface{}, fn func(childCtx context.Context) error) error {
 	if metricExporter == nil {
 		return fn(ctx)
 	}
@@ -54,16 +53,16 @@ func Time(ctx context.Context, opts *options.TerragruntOptions, name string, att
 	histogram.Record(ctx, time.Since(startTime).Milliseconds(), otelmetric.WithAttributes(metricAttrs...))
 	if err != nil {
 		// count errors
-		Count(ctx, opts, ErrorsCounter, 1)
-		Count(ctx, opts, fmt.Sprintf("%s_errors", name), 1)
+		Count(ctx, ErrorsCounter, 1)
+		Count(ctx, fmt.Sprintf("%s_errors", name), 1)
 	} else {
-		Count(ctx, opts, fmt.Sprintf("%s_success", name), 1)
+		Count(ctx, fmt.Sprintf("%s_success", name), 1)
 	}
 	return err
 }
 
 // Count - add to counter provided value
-func Count(ctx context.Context, opts *options.TerragruntOptions, name string, value int64) {
+func Count(ctx context.Context, name string, value int64) {
 	if ctx == nil || metricExporter == nil {
 		return
 	}
@@ -98,7 +97,7 @@ func configureMetricsCollection(ctx context.Context, opts *TelemetryOptions) err
 // newMetricsExporter - create a new exporter based on the telemetry options.
 func newMetricsExporter(ctx context.Context, opts *TelemetryOptions) (metric.Exporter, error) {
 	exporterType := metricsExporterType(env.GetString(opts.Vars["TERRAGRUNT_TELEMETRY_METRIC_EXPORTER"], string(noneMetricsExporterType)))
-	insecure := env.GetBool(opts.Vars["TERRAGRUNT_TELEMERTY_METRIC_EXPORTER_INSECURE_ENDPOINT"], false)
+	insecure := env.GetBool(opts.GetValue("TERRAGRUNT_TELEMETRY_METRIC_EXPORTER_INSECURE_ENDPOINT", "TERRAGRUNT_TELEMERTY_METRIC_EXPORTER_INSECURE_ENDPOINT"), false)
 	switch exporterType {
 	case oltpHttpMetricsExporterType:
 		var config []otlpmetrichttp.Option

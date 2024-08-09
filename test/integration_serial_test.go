@@ -29,16 +29,14 @@ import (
 	"github.com/gruntwork-io/terragrunt/util"
 )
 
-// @SONAR_STOP@
-
 // NOTE: We don't run these tests in parallel because it modifies the environment variable, so it can affect other tests
 
 func TestTerragruntProviderCacheWithFilesystemMirror(t *testing.T) {
 	// In this test we use os.Setenv to set the Terraform env var TF_CLI_CONFIG_FILE.
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
+	cleanupTerraformFolder(t, TEST_FIXTURE_PROVIDER_CACHE_FILESYSTEM_MIRROR)
+	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_PROVIDER_CACHE_FILESYSTEM_MIRROR)
+	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_PROVIDER_CACHE_FILESYSTEM_MIRROR)
 
 	appPath := filepath.Join(rootPath, "app")
 	providersMirrorPath := filepath.Join(rootPath, "providers-mirror")
@@ -46,8 +44,18 @@ func TestTerragruntProviderCacheWithFilesystemMirror(t *testing.T) {
 	fakeProvider := FakeProvider{
 		RegistryName: "example.com",
 		Namespace:    "hashicorp",
-		Name:         "null",
-		Version:      "3.2.2",
+		Name:         "aws",
+		Version:      "5.59.0",
+		PlatformOS:   runtime.GOOS,
+		PlatformArch: runtime.GOARCH,
+	}
+	fakeProvider.CreateMirror(t, providersMirrorPath)
+
+	fakeProvider = FakeProvider{
+		RegistryName: "example.com",
+		Namespace:    "hashicorp",
+		Name:         "azurerm",
+		Version:      "3.113.0",
 		PlatformOS:   runtime.GOOS,
 		PlatformArch: runtime.GOARCH,
 	}
@@ -71,37 +79,58 @@ func TestTerragruntProviderCacheWithFilesystemMirror(t *testing.T) {
 	cliConfigSettings := &CLIConfigSettings{
 		FilesystemMirrorMethods: []CLIConfigProviderInstallationFilesystemMirror{
 			{
-				Path: providersMirrorPath,
+				Path:    providersMirrorPath,
+				Include: []string{"example.com/*/*"},
 			},
 		},
 	}
 	createCLIConfig(t, cliConfigFilename, cliConfigSettings)
 
-	runTerragrunt(t, fmt.Sprintf("terragrunt run-all init --terragrunt-provider-cache --terragrunt-provider-cache-registry-names example.com --terragrunt-provider-cache-dir %s --terragrunt-log-level trace --terragrunt-non-interactive --terragrunt-working-dir %s", providerCacheDir, appPath))
+	runTerragrunt(t, fmt.Sprintf("terragrunt run-all init --terragrunt-provider-cache --terragrunt-provider-cache-registry-names example.com --terragrunt-provider-cache-registry-names registry.opentofu.org --terragrunt-provider-cache-registry-names registry.terraform.io --terragrunt-provider-cache-dir %s --terragrunt-log-level trace --terragrunt-non-interactive --terragrunt-working-dir %s", providerCacheDir, appPath))
+
+	expectedProviderInstallation := `provider_installation { "filesystem_mirror" { path = "%s" include = ["example.com/*/*"] exclude = ["example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } "filesystem_mirror" { path = "%s" include = ["example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } "direct" { } }`
+	expectedProviderInstallation = fmt.Sprintf(strings.Join(strings.Fields(expectedProviderInstallation), " "), providersMirrorPath, providerCacheDir)
+
+	terraformrcBytes, err := os.ReadFile(filepath.Join(appPath, ".terraformrc"))
+	require.NoError(t, err)
+	terraformrc := strings.Join(strings.Fields(string(terraformrcBytes)), " ")
+
+	assert.Contains(t, terraformrc, expectedProviderInstallation, "%s\n\n%s", terraformrc, expectedProviderInstallation)
 }
 
 func TestTerragruntProviderCacheWithNetworkMirror(t *testing.T) {
 	// In this test we use os.Setenv to set the Terraform env var TF_CLI_CONFIG_FILE.
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
+	cleanupTerraformFolder(t, TEST_FIXTURE_PROVIDER_CACHE_NETWORK_MIRROR)
+	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_PROVIDER_CACHE_NETWORK_MIRROR)
+	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_PROVIDER_CACHE_NETWORK_MIRROR)
 
 	appPath := filepath.Join(rootPath, "app")
-	providersMirrorPath := filepath.Join(rootPath, "providers-mirror")
+	providersNetkworMirrorPath := filepath.Join(rootPath, "providers-network-mirror")
+	providersFilesystemMirrorPath := filepath.Join(rootPath, "providers-filesystem-mirror")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	fakeProvider := FakeProvider{
+	netowrkProvider := FakeProvider{
 		RegistryName: "example.com",
 		Namespace:    "hashicorp",
-		Name:         "null",
-		Version:      "3.2.2",
+		Name:         "aws",
+		Version:      "5.59.0",
 		PlatformOS:   runtime.GOOS,
 		PlatformArch: runtime.GOARCH,
 	}
-	fakeProvider.CreateMirror(t, providersMirrorPath)
+	netowrkProvider.CreateMirror(t, providersNetkworMirrorPath)
+
+	filesystemProvider := FakeProvider{
+		RegistryName: "example.com",
+		Namespace:    "hashicorp",
+		Name:         "azurerm",
+		Version:      "3.113.0",
+		PlatformOS:   runtime.GOOS,
+		PlatformArch: runtime.GOARCH,
+	}
+	filesystemProvider.CreateMirror(t, providersFilesystemMirrorPath)
 
 	// when we run NetworkMirrorServer, we override the default transport to configure the self-signed certificate, we need to restor, after finishing we need to restore this value
 	defaultTransport := http.DefaultTransport
@@ -109,15 +138,23 @@ func TestTerragruntProviderCacheWithNetworkMirror(t *testing.T) {
 		http.DefaultTransport = defaultTransport
 	}()
 
-	networkMirrorURL := runNetworkMirrorServer(t, ctx, "/providers/", providersMirrorPath)
-	t.Logf("Provdiers mirror path: %s", providersMirrorPath)
+	token := "123456790"
+
+	networkMirrorURL := runNetworkMirrorServer(t, ctx, "/providers/", providersNetkworMirrorPath, token)
 	t.Logf("Network mirror URL: %s", networkMirrorURL)
+	t.Logf("Provdiers network mirror path: %s", providersNetkworMirrorPath)
+	t.Logf("Provdiers filesysmte mirror path: %s", providersFilesystemMirrorPath)
 
 	providerCacheDir := filepath.Join(rootPath, "providers-cache")
 
 	cliConfigFilename, err := os.CreateTemp("", "*")
 	require.NoError(t, err)
 	defer cliConfigFilename.Close()
+
+	tokenEnvName := fmt.Sprintf("TF_TOKEN_%s", strings.ReplaceAll(networkMirrorURL.Hostname(), ".", "_"))
+	err = os.Setenv(tokenEnvName, token)
+	require.NoError(t, err)
+	defer os.Unsetenv(tokenEnvName)
 
 	err = os.Setenv(terraform.EnvNameTFCLIConfigFile, cliConfigFilename.Name())
 	require.NoError(t, err)
@@ -126,15 +163,36 @@ func TestTerragruntProviderCacheWithNetworkMirror(t *testing.T) {
 	t.Logf("%s=%s", terraform.EnvNameTFCLIConfigFile, cliConfigFilename.Name())
 
 	cliConfigSettings := &CLIConfigSettings{
+		DirectMethods: []CLIConfigProviderInstallationDirect{
+			{
+				Exclude: []string{"example.com/*/*"},
+			},
+		},
+		FilesystemMirrorMethods: []CLIConfigProviderInstallationFilesystemMirror{
+			{
+				Path:    providersFilesystemMirrorPath,
+				Include: []string{"example.com/hashicorp/azurerm"},
+			},
+		},
 		NetworkMirrorMethods: []CLIConfigProviderInstallationNetworkMirror{
 			{
-				URL: networkMirrorURL.String(),
+				URL:     networkMirrorURL.String(),
+				Exclude: []string{"example.com/hashicorp/azurerm"},
 			},
 		},
 	}
 	createCLIConfig(t, cliConfigFilename, cliConfigSettings)
 
-	runTerragrunt(t, fmt.Sprintf("terragrunt run-all init --terragrunt-provider-cache --terragrunt-provider-cache-registry-names example.com --terragrunt-provider-cache-dir %s --terragrunt-log-level trace --terragrunt-non-interactive --terragrunt-working-dir %s", providerCacheDir, appPath))
+	runTerragrunt(t, fmt.Sprintf("terragrunt run-all init --terragrunt-provider-cache --terragrunt-provider-cache-registry-names example.com --terragrunt-provider-cache-registry-names registry.opentofu.org --terragrunt-provider-cache-registry-names registry.terraform.io --terragrunt-provider-cache-dir %s --terragrunt-log-level trace --terragrunt-non-interactive --terragrunt-working-dir %s", providerCacheDir, appPath))
+
+	expectedProviderInstallation := `provider_installation { "filesystem_mirror" { path = "%s" include = ["example.com/hashicorp/azurerm"] exclude = ["example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } "network_mirror" { url = "%s" exclude = ["example.com/hashicorp/azurerm", "example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } "filesystem_mirror" { path = "%s" include = ["example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } "direct" { exclude = ["example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } }`
+	expectedProviderInstallation = fmt.Sprintf(strings.Join(strings.Fields(expectedProviderInstallation), " "), providersFilesystemMirrorPath, networkMirrorURL.String(), providerCacheDir)
+
+	terraformrcBytes, err := os.ReadFile(filepath.Join(appPath, ".terraformrc"))
+	require.NoError(t, err)
+	terraformrc := strings.Join(strings.Fields(string(terraformrcBytes)), " ")
+
+	assert.Contains(t, terraformrc, expectedProviderInstallation, "%s\n\n%s", terraformrc, expectedProviderInstallation)
 }
 
 func TestTerragruntInputsFromDependency(t *testing.T) {
@@ -861,9 +919,9 @@ func TestReadTerragruntAuthProviderCmdRemoteState(t *testing.T) {
 		os.Setenv("AWS_SECRET_ACCESS_KEY", secretAccessKey)
 	}()
 
-	creadsConfig := util.JoinPath(rootPath, "creds.config")
+	credsConfig := util.JoinPath(rootPath, "creds.config")
 
-	copyAndFillMapPlaceholders(t, creadsConfig, creadsConfig, map[string]string{
+	copyAndFillMapPlaceholders(t, credsConfig, credsConfig, map[string]string{
 		"__FILL_AWS_ACCESS_KEY_ID__":     accessKeyID,
 		"__FILL_AWS_SECRET_ACCESS_KEY__": secretAccessKey,
 	})
@@ -871,4 +929,32 @@ func TestReadTerragruntAuthProviderCmdRemoteState(t *testing.T) {
 	runTerragrunt(t, fmt.Sprintf("terragrunt plan --terragrunt-non-interactive --terragrunt-working-dir %s --terragrunt-auth-provider-cmd %s", rootPath, mockAuthCmd))
 }
 
-// @SONAR_START@
+func TestReadTerragruntAuthProviderCmdCredsForDependency(t *testing.T) {
+	cleanupTerraformFolder(t, TEST_FIXTURE_AUTH_PROVIDER_CMD)
+	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_AUTH_PROVIDER_CMD)
+	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_AUTH_PROVIDER_CMD, "creds-for-dependency")
+	mockAuthCmd := filepath.Join(tmpEnvPath, TEST_FIXTURE_AUTH_PROVIDER_CMD, "mock-auth-cmd.sh")
+
+	accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretAccessKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	os.Setenv("AWS_ACCESS_KEY_ID", "")
+	os.Setenv("AWS_SECRET_ACCESS_KEY", "")
+
+	defer func() {
+		os.Setenv("AWS_ACCESS_KEY_ID", accessKeyID)
+		os.Setenv("AWS_SECRET_ACCESS_KEY", secretAccessKey)
+	}()
+
+	dependencyCredsConfig := util.JoinPath(rootPath, "dependency", "creds.config")
+	copyAndFillMapPlaceholders(t, dependencyCredsConfig, dependencyCredsConfig, map[string]string{
+		"__FILL_AWS_ACCESS_KEY_ID__":     accessKeyID,
+		"__FILL_AWS_SECRET_ACCESS_KEY__": secretAccessKey,
+	})
+
+	dependentCredsConfig := util.JoinPath(rootPath, "dependent", "creds.config")
+	copyAndFillMapPlaceholders(t, dependentCredsConfig, dependentCredsConfig, map[string]string{
+		"__FILL_AWS_ACCESS_KEY_ID__":     accessKeyID,
+		"__FILL_AWS_SECRET_ACCESS_KEY__": secretAccessKey,
+	})
+	runTerragrunt(t, fmt.Sprintf("terragrunt run-all apply --terragrunt-non-interactive --terragrunt-working-dir %s --terragrunt-auth-provider-cmd %s", rootPath, mockAuthCmd))
+}

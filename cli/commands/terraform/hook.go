@@ -16,6 +16,12 @@ import (
 	"github.com/hashicorp/go-multierror"
 )
 
+const (
+	HookCtxTFPathEnvName   = "TG_CTX_TF_PATH"
+	HookCtxCommandEnvName  = "TG_CTX_COMMAND"
+	HookCtxHookNameEnvName = "TG_CTX_HOOK_NAME"
+)
+
 func processErrorHooks(ctx context.Context, hooks []config.ErrorHook, terragruntOptions *options.TerragruntOptions, previousExecErrors *multierror.Error) error {
 	if len(hooks) == 0 || previousExecErrors.ErrorOrNil() == nil {
 		return nil
@@ -35,7 +41,7 @@ func processErrorHooks(ctx context.Context, hooks []config.ErrorHook, terragrunt
 				// https://github.com/gruntwork-io/terragrunt/issues/2045
 				originalError := errors.Unwrap(e)
 				if originalError != nil {
-					processError, cast := originalError.(shell.ProcessExecutionError)
+					processError, cast := originalError.(util.ProcessExecutionError)
 					if cast {
 						errorMessage = fmt.Sprintf("%s\n%s", processError.StdOut, processError.Stderr)
 					}
@@ -62,6 +68,7 @@ func processErrorHooks(ctx context.Context, hooks []config.ErrorHook, terragrunt
 
 			actionToExecute := curHook.Execute[0]
 			actionParams := curHook.Execute[1:]
+			terragruntOptions = terragruntOptionsWithHookEnvs(terragruntOptions, curHook.Name)
 
 			_, possibleError := shell.RunShellCommandWithOutput(
 				ctx,
@@ -134,6 +141,7 @@ func runHook(ctx context.Context, terragruntOptions *options.TerragruntOptions, 
 
 	actionToExecute := curHook.Execute[0]
 	actionParams := curHook.Execute[1:]
+	terragruntOptions = terragruntOptionsWithHookEnvs(terragruntOptions, curHook.Name)
 
 	if actionToExecute == "tflint" {
 		if err := executeTFLint(ctx, terragruntOptions, terragruntConfig, curHook, workingDir); err != nil {
@@ -168,4 +176,14 @@ func executeTFLint(ctx context.Context, terragruntOptions *options.TerragruntOpt
 		return err
 	}
 	return nil
+}
+
+func terragruntOptionsWithHookEnvs(opts *options.TerragruntOptions, hookName string) *options.TerragruntOptions {
+	newOpts := *opts
+	newOpts.Env = util.CloneStringMap(opts.Env)
+	newOpts.Env[HookCtxTFPathEnvName] = opts.TerraformPath
+	newOpts.Env[HookCtxCommandEnvName] = opts.TerraformCommand
+	newOpts.Env[HookCtxHookNameEnvName] = hookName
+
+	return &newOpts
 }

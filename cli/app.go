@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gruntwork-io/terragrunt/engine"
+
 	"github.com/gruntwork-io/terragrunt/telemetry"
 	"github.com/gruntwork-io/terragrunt/terraform"
 	"golang.org/x/sync/errgroup"
@@ -18,6 +20,7 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/gruntwork-io/terragrunt/cli/commands/graph"
+	"github.com/gruntwork-io/terragrunt/cli/commands/hclvalidate"
 
 	"github.com/gruntwork-io/terragrunt/cli/commands/scaffold"
 
@@ -67,7 +70,7 @@ func NewApp(writer io.Writer, errWriter io.Writer) *App {
 
 	app := cli.NewApp()
 	app.Name = "terragrunt"
-	app.Usage = "Terragrunt is a thin wrapper for Terraform that provides extra tools for working with multiple\nTerraform modules, remote state, and locking. For documentation, see https://github.com/gruntwork-io/terragrunt/."
+	app.Usage = "Terragrunt is a flexible orchestration tool that allows Infrastructure as Code written in OpenTofu/Terraform to scale. For documentation, see https://terragrunt.gruntwork.io/."
 	app.Author = "Gruntwork <www.gruntwork.io>"
 	app.Version = version.GetVersion()
 	app.Writer = writer
@@ -97,6 +100,11 @@ func (app *App) RunContext(ctx context.Context, args []string) error {
 		log.Infof("%s signal received. Gracefully shutting down... (it can take up to %v)", cases.Title(language.English).String(signal.String()), shell.SignalForwardingDelay)
 		cancel()
 
+		shell.RegisterSignalHandler(func(signal os.Signal) {
+			log.Infof("Second %s signal received, force shutting down...", cases.Title(language.English).String(signal.String()))
+			os.Exit(1)
+		})
+
 		time.Sleep(forceExitInterval)
 		log.Infof("Failed to gracefully shutdown within %v, force shutting down...", forceExitInterval)
 		os.Exit(1)
@@ -115,6 +123,18 @@ func (app *App) RunContext(ctx context.Context, args []string) error {
 	}
 	defer func(ctx context.Context) {
 		if err := telemetry.ShutdownTelemetry(ctx); err != nil {
+			_, _ = app.ErrWriter.Write([]byte(err.Error()))
+		}
+	}(ctx)
+
+	ctx = config.WithConfigValues(ctx)
+
+	// init engine if required
+	if engine.IsEngineEnabled() {
+		ctx = engine.WithEngineValues(ctx)
+	}
+	defer func(ctx context.Context) {
+		if err := engine.Shutdown(ctx); err != nil {
 			_, _ = app.ErrWriter.Write([]byte(err.Error()))
 		}
 	}(ctx)
@@ -139,6 +159,7 @@ func terragruntCommands(opts *options.TerragruntOptions) cli.Commands {
 		catalog.NewCommand(opts),            // catalog
 		scaffold.NewCommand(opts),           // scaffold
 		graph.NewCommand(opts),              // graph
+		hclvalidate.NewCommand(opts),        // hclvalidate
 	}
 
 	sort.Sort(cmds)
@@ -310,10 +331,21 @@ func initialSetup(cliCtx *cli.Context, opts *options.TerragruntOptions) error {
 		return err
 	}
 
+	if len(opts.IncludeDirs) > 0 {
+		opts.Logger.Debugf("Included directories set. Excluding by default.")
+		opts.ExcludeByDefault = true
+	}
+
 	opts.IncludeDirs, err = util.GlobCanonicalPath(opts.WorkingDir, opts.IncludeDirs...)
 	if err != nil {
 		return err
 	}
+
+	excludeDirs, err := util.GetExcludeDirsFromFile(opts.WorkingDir, opts.ExcludesFile)
+	if err != nil {
+		return err
+	}
+	opts.ExcludeDirs = append(opts.ExcludeDirs, excludeDirs...)
 
 	// --- Terragrunt Version
 	terragruntVersion, err := hashicorpversion.NewVersion(cliCtx.App.Version)

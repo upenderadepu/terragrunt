@@ -2,14 +2,18 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+
+	clone "github.com/huandu/go-clone"
+
+	"github.com/gruntwork-io/terragrunt/internal/cache"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/gruntwork-io/go-commons/errors"
 	"github.com/gruntwork-io/terragrunt/config/hclparse"
-	"github.com/gruntwork-io/terragrunt/internal/cache"
 	"github.com/gruntwork-io/terragrunt/util"
 )
 
@@ -79,7 +83,7 @@ type terragruntVersionConstraints struct {
 
 // terragruntDependency is a struct that can be used to only decode the dependency blocks in the terragrunt config
 type terragruntDependency struct {
-	Dependencies []Dependency `hcl:"dependency,block"`
+	Dependencies Dependencies `hcl:"dependency,block"`
 	Remain       hcl.Body     `hcl:",remain"`
 }
 
@@ -136,15 +140,26 @@ func DecodeBaseBlocks(ctx *ParsingContext, file *hclparse.File, includeFromChild
 }
 
 func PartialParseConfigFile(ctx *ParsingContext, configPath string, include *IncludeConfig) (*TerragruntConfig, error) {
-	file, err := hclparse.NewParser().WithOptions(ctx.ParserOptions...).ParseFromFile(configPath)
+	hclCache := cache.ContextCache[*hclparse.File](ctx, HclCacheContextKey)
+
+	fileInfo, err := os.Stat(configPath)
 	if err != nil {
 		return nil, err
+	}
+	var file *hclparse.File
+	var cacheKey = fmt.Sprintf("configPath-%v-modTime-%v", configPath, fileInfo.ModTime().UnixMicro())
+
+	if cacheConfig, found := hclCache.Get(ctx, cacheKey); found {
+		file = cacheConfig
+	} else {
+		file, err = hclparse.NewParser().WithOptions(ctx.ParserOptions...).ParseFromFile(configPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return TerragruntConfigFromPartialConfig(ctx, file, include)
 }
-
-var terragruntConfigCache = cache.NewCache[TerragruntConfig]()
 
 // Wrapper of PartialParseConfigString which checks for cached configs.
 // filename, configString, includeFromChild and decodeList are used for the cache key,
@@ -152,10 +167,12 @@ var terragruntConfigCache = cache.NewCache[TerragruntConfig]()
 func TerragruntConfigFromPartialConfig(ctx *ParsingContext, file *hclparse.File, includeFromChild *IncludeConfig) (*TerragruntConfig, error) {
 	var cacheKey = fmt.Sprintf("%#v-%#v-%#v-%#v", file.ConfigPath, file.Content(), includeFromChild, ctx.PartialParseDecodeList)
 
+	terragruntConfigCache := cache.ContextCache[*TerragruntConfig](ctx, RunCmdCacheContextKey)
 	if ctx.TerragruntOptions.UsePartialParseConfigCache {
-		if config, found := terragruntConfigCache.Get(cacheKey); found {
+		if config, found := terragruntConfigCache.Get(ctx, cacheKey); found {
 			ctx.TerragruntOptions.Logger.Debugf("Cache hit for '%s' (partial parsing), decodeList: '%v'.", file.ConfigPath, ctx.PartialParseDecodeList)
-			return &config, nil
+			deepCopy := clone.Clone(config).(*TerragruntConfig)
+			return deepCopy, nil
 		}
 
 		ctx.TerragruntOptions.Logger.Debugf("Cache miss for '%s' (partial parsing), decodeList: '%v'.", file.ConfigPath, ctx.PartialParseDecodeList)
@@ -167,7 +184,8 @@ func TerragruntConfigFromPartialConfig(ctx *ParsingContext, file *hclparse.File,
 	}
 
 	if ctx.TerragruntOptions.UsePartialParseConfigCache {
-		terragruntConfigCache.Put(cacheKey, *config)
+		putConfig := clone.Clone(config).(*TerragruntConfig)
+		terragruntConfigCache.Put(ctx, cacheKey, putConfig)
 	}
 
 	return config, nil
@@ -265,8 +283,10 @@ func PartialParseConfig(ctx *ParsingContext, file *hclparse.File, includeFromChi
 			if err != nil {
 				return nil, err
 			}
-			output.TerragruntDependencies = decoded.Dependencies
+			// In normal operation, if a dependency block does not have a `config_path` attribute, decoding returns an error since this attribute is required, but the `hclvalidate` command suppresses decoding errors and this causes a cycle between modules, so we need to filter out dependencies without a defined `config_path`.
+			decoded.Dependencies = decoded.Dependencies.FilteredWithoutConfigPath()
 
+			output.TerragruntDependencies = decoded.Dependencies
 			// Convert dependency blocks into module depenency lists. If we already decoded some dependencies,
 			// merge them in. Otherwise, set as the new list.
 			dependencies := dependencyBlocksToModuleDependencies(decoded.Dependencies)
@@ -314,12 +334,6 @@ func PartialParseConfig(ctx *ParsingContext, file *hclparse.File, includeFromChi
 					return nil, err
 				}
 				ctx.TerragruntOptions.Logger.Warnf("Failed to decode inputs %v", diagErr)
-
-				inputs, err := updateUnknownCtyValValues(decoded.Inputs)
-				if err != nil {
-					return nil, err
-				}
-				decoded.Inputs = inputs
 			}
 
 			if decoded.Inputs != nil {

@@ -8,6 +8,7 @@ env: &env
   environment:
     GRUNTWORK_INSTALLER_VERSION: v0.0.39
     MODULE_CI_VERSION: v0.57.0
+    TOFU_ENGINE_VERSION: "v0.0.4"
 
 defaults: &defaults
   docker:
@@ -33,7 +34,7 @@ install_tofu: &install_tofu
   command: |
     pushd .
     cd /tmp
-    curl -L "https://github.com/opentofu/opentofu/releases/download/v1.7.0/tofu_1.7.0_linux_amd64.zip" -o tofu.zip
+    curl -L "https://github.com/opentofu/opentofu/releases/download/v1.8.0/tofu_1.8.0_linux_amd64.zip" -o tofu.zip
     unzip -o tofu.zip
     sudo install -m 0755 tofu /usr/local/bin/tofu
     rm -rf tofu
@@ -53,6 +54,16 @@ install_tflint: &install_tflint
     rm -rf tflint.zip
     popd
     tflint --version
+
+install_tofu_engine: &install_tofu_engine
+  name: Install OpenTofu Engine
+  command: |
+    # Download the OpenTofu Engine binary
+    set -x
+    export REPO="gruntwork-io/terragrunt-engine-opentofu"
+    export ASSET_NAME="terragrunt-iac-engine-opentofu_rpc_${TOFU_ENGINE_VERSION}_linux_amd64.zip"
+    wget -O "engine.zip" "https://github.com/${REPO}/releases/download/${TOFU_ENGINE_VERSION}/${ASSET_NAME}"
+    unzip -o "engine.zip"
 
 setup_test_environment: &setup_test_environment
   name: Setup integration tests environment
@@ -301,6 +312,35 @@ jobs:
       - store_test_results:
           path: logs
 
+  integration_test_tofu_engine:
+    resource_class: xlarge
+    <<: *defaults
+    <<: *env
+    steps:
+      - checkout
+      - run:
+          <<: *install_tofu
+      - run:
+          <<: *install_tofu_engine
+      - run:
+          <<: *setup_test_environment
+      - run:
+          # Remove terraform
+          sudo rm -f $(which terraform)
+      - run:
+          name: Run engine integration tests
+          command: |
+            run-go-tests --packages "-tags=engine -run ^TestEngine ./test" | tee logs/integration.log
+          no_output_timeout: 30m
+          environment:
+            TERRAGRUNT_TFPATH: tofu
+      - run:
+          <<: *run_terratest_log_parser
+      - store_artifacts:
+          path: logs
+      - store_test_results:
+          path: logs
+
   # Run TFLint tests separately as tflint during execution change working directory.
   integration_test_tflint:
     resource_class: large
@@ -488,6 +528,15 @@ workflows:
             - AWS__PHXDEVOPS__circle-ci-test
             - GCP__automated-tests
             - GITHUB__PAT__gruntwork-ci
+      - integration_test_tofu_engine:
+          filters:
+            tags:
+              only: /^v.*/
+          context:
+            - AWS__PHXDEVOPS__circle-ci-test
+            - GCP__automated-tests
+            - GITHUB__PAT__gruntwork-ci
+            - APPLE__OSX__code-signing
       - run_markdownlint:
           filters:
             tags:

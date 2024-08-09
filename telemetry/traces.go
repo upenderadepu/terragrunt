@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gruntwork-io/terragrunt/options"
-
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 
 	"github.com/gruntwork-io/go-commons/env"
@@ -18,7 +16,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -35,7 +33,7 @@ const (
 )
 
 // Trace - collect traces for method execution
-func Trace(ctx context.Context, opts *options.TerragruntOptions, name string, attrs map[string]interface{}, fn func(childCtx context.Context) error) error {
+func Trace(ctx context.Context, name string, attrs map[string]interface{}, fn func(childCtx context.Context) error) error {
 	if spanExporter == nil || traceProvider == nil { // invoke function without tracing
 		return fn(ctx)
 	}
@@ -127,13 +125,13 @@ func newTraceProvider(opts *TelemetryOptions, exp sdktrace.SpanExporter) (*sdktr
 // newTraceExporter - create a new exporter based on the telemetry options.
 func newTraceExporter(ctx context.Context, opts *TelemetryOptions) (sdktrace.SpanExporter, error) {
 	exporterType := traceExporterType(env.GetString(opts.Vars["TERRAGRUNT_TELEMETRY_TRACE_EXPORTER"], string(noneTraceExporterType)))
-	insecure := env.GetBool(opts.Vars["TERRAGRUNT_TELEMERTY_TRACE_EXPORTER_INSECURE_ENDPOINT"], false)
+	insecure := env.GetBool(opts.GetValue("TERRAGRUNT_TELEMETRY_TRACE_EXPORTER_INSECURE_ENDPOINT", "TERRAGRUNT_TELEMERTY_TRACE_EXPORTER_INSECURE_ENDPOINT"), false)
 	switch exporterType {
 	case httpTraceExporterType:
-		endpoint := env.GetString(opts.Vars["TERRAGRUNT_TELEMERTY_TRACE_EXPORTER_HTTP_ENDPOINT"], "")
+		endpoint := env.GetString(opts.GetValue("TERRAGRUNT_TELEMETRY_TRACE_EXPORTER_HTTP_ENDPOINT", "TERRAGRUNT_TELEMERTY_TRACE_EXPORTER_HTTP_ENDPOINT"), "")
 		if endpoint == "" {
 			return nil, &ErrorMissingEnvVariable{
-				Vars: []string{"TERRAGRUNT_TELEMERTY_TRACE_EXPORTER_HTTP_ENDPOINT"},
+				Vars: []string{"TERRAGRUNT_TELEMETRY_TRACE_EXPORTER_HTTP_ENDPOINT"},
 			}
 		}
 		endpointOpt := otlptracehttp.WithEndpoint(endpoint)
