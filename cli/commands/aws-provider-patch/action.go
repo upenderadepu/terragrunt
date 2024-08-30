@@ -31,7 +31,6 @@ package awsproviderpatch
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,18 +67,20 @@ func runAwsProviderPatch(ctx context.Context, opts *options.TerragruntOptions, c
 
 	for _, terraformFile := range terraformFilesInModules {
 		opts.Logger.Debugf("Looking at file %s", terraformFile)
+
 		originalTerraformFileContents, err := util.ReadFileAsString(terraformFile)
 		if err != nil {
 			return err
 		}
 
-		updatedTerraformFileContents, codeWasUpdated, err := patchAwsProviderInTerraformCode(originalTerraformFileContents, terraformFile, opts.AwsProviderPatchOverrides)
+		updatedTerraformFileContents, codeWasUpdated, err := PatchAwsProviderInTerraformCode(originalTerraformFileContents, terraformFile, opts.AwsProviderPatchOverrides)
 		if err != nil {
 			return err
 		}
 
 		if codeWasUpdated {
 			opts.Logger.Debugf("Patching AWS provider in %s", terraformFile)
+
 			if err := util.WriteFileWithSamePermissions(terraformFile, terraformFile, []byte(updatedTerraformFileContents)); err != nil {
 				return err
 			}
@@ -91,13 +92,13 @@ func runAwsProviderPatch(ctx context.Context, opts *options.TerragruntOptions, c
 
 // The format we expect in the .terraform/modules/modules.json file
 type TerraformModulesJson struct {
-	Modules []TerraformModule
+	Modules []TerraformModule `json:"Modules"`
 }
 
 type TerraformModule struct {
-	Key    string
-	Source string
-	Dir    string
+	Key    string `json:"Key"`
+	Source string `json:"Source"`
+	Dir    string `json:"Dir"`
 }
 
 // findAllTerraformFiles returns all Terraform source files within the modules being used by this Terragrunt
@@ -142,7 +143,7 @@ func findAllTerraformFilesInModules(opts *options.TerragruntOptions) ([]string, 
 			// Ideally, we'd use a builtin Go library like filepath.Glob here, but per https://github.com/golang/go/issues/11862,
 			// the current go implementation doesn't support treating ** as zero or more directories, just zero or one.
 			// So we use a third-party library.
-			matches, err := zglob.Glob(fmt.Sprintf("%s/**/*.tf", moduleAbsPath))
+			matches, err := zglob.Glob(moduleAbsPath + "/**/*.tf")
 			if err != nil {
 				return nil, errors.WithStackTrace(err)
 			}
@@ -154,7 +155,7 @@ func findAllTerraformFilesInModules(opts *options.TerragruntOptions) ([]string, 
 	return terraformFiles, nil
 }
 
-// patchAwsProviderInTerraformCode looks for provider "aws" { ... } blocks in the given Terraform code and overwrites
+// PatchAwsProviderInTerraformCode looks for provider "aws" { ... } blocks in the given Terraform code and overwrites
 // the attributes in those provider blocks with the given attributes. It returns the new Terraform code and a boolean
 // true if that code was updated.
 //
@@ -173,7 +174,7 @@ func findAllTerraformFilesInModules(opts *options.TerragruntOptions) ([]string, 
 // This is a temporary workaround for a Terraform bug (https://github.com/hashicorp/terraform/issues/13018) where
 // any dynamic values in nested provider blocks are not handled correctly when you call 'terraform import', so by
 // temporarily hard-coding them, we can allow 'import' to work.
-func patchAwsProviderInTerraformCode(terraformCode string, terraformFilePath string, attributesToOverride map[string]string) (string, bool, error) {
+func PatchAwsProviderInTerraformCode(terraformCode string, terraformFilePath string, attributesToOverride map[string]string) (string, bool, error) {
 	if len(attributesToOverride) == 0 {
 		return terraformCode, false, nil
 	}
@@ -192,6 +193,7 @@ func patchAwsProviderInTerraformCode(terraformCode string, terraformFilePath str
 				if err != nil {
 					return string(hclFile.Bytes()), codeWasUpdated, err
 				}
+
 				codeWasUpdated = codeWasUpdated || attributeOverridden
 			}
 		}
@@ -258,12 +260,14 @@ func overrideAttributeInBlock(block *hclwrite.Block, key string, value string) (
 	// we maintain a mapping of all possible provider configurations (which is unmaintainable). To handle this, we
 	// assume the user provided input is json, and convert to cty that way.
 	valueBytes := []byte(value)
+
 	ctyType, err := ctyjson.ImpliedType(valueBytes)
 	if err != nil {
 		// Wrap error in a custom error type that has better error messaging to the user.
 		returnErr := TypeInferenceError{value: value, underlyingErr: err}
 		return false, errors.WithStackTrace(returnErr)
 	}
+
 	ctyVal, err := ctyjson.Unmarshal(valueBytes, ctyType)
 	if err != nil {
 		// Wrap error in a custom error type that has better error messaging to the user.
@@ -272,6 +276,7 @@ func overrideAttributeInBlock(block *hclwrite.Block, key string, value string) (
 	}
 
 	body.SetAttributeValue(attr, ctyVal)
+
 	return true, nil
 }
 
@@ -318,5 +323,6 @@ func traverseBlock(block *hclwrite.Block, keyParts []string) (*hclwrite.Body, st
 	}
 
 	blockName := keyParts[0]
+
 	return traverseBlock(block.Body().FirstMatchingBlock(blockName, nil), keyParts[1:])
 }

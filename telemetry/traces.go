@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gruntwork-io/terragrunt/options"
-
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 
 	"github.com/gruntwork-io/go-commons/env"
@@ -18,7 +16,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -35,7 +33,7 @@ const (
 )
 
 // Trace - collect traces for method execution
-func Trace(ctx context.Context, opts *options.TerragruntOptions, name string, attrs map[string]interface{}, fn func(childCtx context.Context) error) error {
+func Trace(ctx context.Context, name string, attrs map[string]interface{}, fn func(childCtx context.Context) error) error {
 	if spanExporter == nil || traceProvider == nil { // invoke function without tracing
 		return fn(ctx)
 	}
@@ -48,23 +46,28 @@ func Trace(ctx context.Context, opts *options.TerragruntOptions, name string, at
 		span.RecordError(err)
 		return err
 	}
+
 	return nil
 }
 
 // configureTraceCollection - configure the traces collection
 func configureTraceCollection(ctx context.Context, opts *TelemetryOptions) error {
-	exp, err := newTraceExporter(ctx, opts)
+	exp, err := NewTraceExporter(ctx, opts)
 	if err != nil {
 		return errors.WithStack(err)
 	}
+
 	if exp == nil { // no exporter
 		return nil
 	}
+
 	spanExporter = exp
+
 	traceProvider, err = newTraceProvider(opts, spanExporter)
 	if err != nil {
 		return errors.WithStack(err)
 	}
+
 	otel.SetTracerProvider(traceProvider)
 	rootTracer = traceProvider.Tracer(opts.AppName)
 
@@ -76,11 +79,14 @@ func configureTraceCollection(ctx context.Context, opts *TelemetryOptions) error
 		if len(parts) != traceParentParts {
 			return fmt.Errorf("invalid TRACEPARENT value %s", traceParent)
 		}
+
 		_, traceIdHex, spanIdHex, traceFlagsStr := parts[0], parts[1], parts[2], parts[3]
+
 		parsedFlag, err := strconv.Atoi(traceFlagsStr)
 		if err != nil {
 			return fmt.Errorf("invalid trace flags: %w", err)
 		}
+
 		traceFlags := trace.FlagsSampled
 		if parsedFlag == 0 {
 			traceFlags = 0
@@ -90,6 +96,7 @@ func configureTraceCollection(ctx context.Context, opts *TelemetryOptions) error
 		if err != nil {
 			return errors.WithStack(err)
 		}
+
 		spanID, err := trace.SpanIDFromHex(spanIdHex)
 		if err != nil {
 			return errors.WithStack(err)
@@ -124,35 +131,42 @@ func newTraceProvider(opts *TelemetryOptions, exp sdktrace.SpanExporter) (*sdktr
 	), nil
 }
 
-// newTraceExporter - create a new exporter based on the telemetry options.
-func newTraceExporter(ctx context.Context, opts *TelemetryOptions) (sdktrace.SpanExporter, error) {
+// NewTraceExporter - create a new exporter based on the telemetry options.
+func NewTraceExporter(ctx context.Context, opts *TelemetryOptions) (sdktrace.SpanExporter, error) {
 	exporterType := traceExporterType(env.GetString(opts.Vars["TERRAGRUNT_TELEMETRY_TRACE_EXPORTER"], string(noneTraceExporterType)))
-	insecure := env.GetBool(opts.Vars["TERRAGRUNT_TELEMERTY_TRACE_EXPORTER_INSECURE_ENDPOINT"], false)
-	switch exporterType {
+	insecure := env.GetBool(opts.GetValue("TERRAGRUNT_TELEMETRY_TRACE_EXPORTER_INSECURE_ENDPOINT", "TERRAGRUNT_TELEMERTY_TRACE_EXPORTER_INSECURE_ENDPOINT"), false)
+
+	// TODO: Remove lint suppression
+	switch exporterType { //nolint:exhaustive
 	case httpTraceExporterType:
-		endpoint := env.GetString(opts.Vars["TERRAGRUNT_TELEMERTY_TRACE_EXPORTER_HTTP_ENDPOINT"], "")
+		endpoint := env.GetString(opts.GetValue("TERRAGRUNT_TELEMETRY_TRACE_EXPORTER_HTTP_ENDPOINT", "TERRAGRUNT_TELEMERTY_TRACE_EXPORTER_HTTP_ENDPOINT"), "")
 		if endpoint == "" {
 			return nil, &ErrorMissingEnvVariable{
-				Vars: []string{"TERRAGRUNT_TELEMERTY_TRACE_EXPORTER_HTTP_ENDPOINT"},
+				Vars: []string{"TERRAGRUNT_TELEMETRY_TRACE_EXPORTER_HTTP_ENDPOINT"},
 			}
 		}
+
 		endpointOpt := otlptracehttp.WithEndpoint(endpoint)
 		config := []otlptracehttp.Option{endpointOpt}
+
 		if insecure {
 			config = append(config, otlptracehttp.WithInsecure())
 		}
+
 		return otlptracehttp.New(ctx, config...)
 	case otlpHttpTraceExporterType:
 		var config []otlptracehttp.Option
 		if insecure {
 			config = append(config, otlptracehttp.WithInsecure())
 		}
+
 		return otlptracehttp.New(ctx, config...)
 	case otlpGrpcTraceExporterType:
 		var config []otlptracegrpc.Option
 		if insecure {
 			config = append(config, otlptracegrpc.WithInsecure())
 		}
+
 		return otlptracegrpc.New(ctx, config...)
 	case consoleTraceExporterType:
 		return stdouttrace.New(stdouttrace.WithWriter(opts.Writer))
@@ -179,8 +193,14 @@ func openSpan(ctx context.Context, name string, attrs map[string]interface{}) (c
 		ctx = trace.ContextWithSpanContext(ctx, spanContext)
 	}
 
-	ctx, span := rootTracer.Start(ctx, name)
+	// This lint is suppressed because we definitely do close the span
+	// in a defer statement everywhere openSpan is called. It seems like
+	// a useful lint, though. We should consider removing the suppression
+	// and fixing the lint.
+
+	ctx, span := rootTracer.Start(ctx, name) // nolint:spancheck
 	// convert attrs map to span.SetAttributes
 	span.SetAttributes(mapToAttributes(attrs)...)
-	return ctx, span
+
+	return ctx, span //nolint:spancheck
 }

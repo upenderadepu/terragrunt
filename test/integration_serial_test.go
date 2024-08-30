@@ -1,4 +1,5 @@
-package test
+//nolint:paralleltest
+package test_test
 
 import (
 	"bytes"
@@ -6,17 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"math"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gruntwork-io/terragrunt/test"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclwrite"
@@ -29,16 +29,14 @@ import (
 	"github.com/gruntwork-io/terragrunt/util"
 )
 
-// @SONAR_STOP@
-
 // NOTE: We don't run these tests in parallel because it modifies the environment variable, so it can affect other tests
 
 func TestTerragruntProviderCacheWithFilesystemMirror(t *testing.T) {
 	// In this test we use os.Setenv to set the Terraform env var TF_CLI_CONFIG_FILE.
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
+	cleanupTerraformFolder(t, testFixtureProviderCacheFilesystemMirror)
+	tmpEnvPath := copyEnvironment(t, testFixtureProviderCacheFilesystemMirror)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureProviderCacheFilesystemMirror)
 
 	appPath := filepath.Join(rootPath, "app")
 	providersMirrorPath := filepath.Join(rootPath, "providers-mirror")
@@ -46,8 +44,18 @@ func TestTerragruntProviderCacheWithFilesystemMirror(t *testing.T) {
 	fakeProvider := FakeProvider{
 		RegistryName: "example.com",
 		Namespace:    "hashicorp",
-		Name:         "null",
-		Version:      "3.2.2",
+		Name:         "aws",
+		Version:      "5.59.0",
+		PlatformOS:   runtime.GOOS,
+		PlatformArch: runtime.GOARCH,
+	}
+	fakeProvider.CreateMirror(t, providersMirrorPath)
+
+	fakeProvider = FakeProvider{
+		RegistryName: "example.com",
+		Namespace:    "hashicorp",
+		Name:         "azurerm",
+		Version:      "3.113.0",
 		PlatformOS:   runtime.GOOS,
 		PlatformArch: runtime.GOARCH,
 	}
@@ -68,40 +76,61 @@ func TestTerragruntProviderCacheWithFilesystemMirror(t *testing.T) {
 
 	t.Logf("%s=%s", terraform.EnvNameTFCLIConfigFile, cliConfigFilename.Name())
 
-	cliConfigSettings := &CLIConfigSettings{
-		FilesystemMirrorMethods: []CLIConfigProviderInstallationFilesystemMirror{
+	cliConfigSettings := &test.CLIConfigSettings{
+		FilesystemMirrorMethods: []test.CLIConfigProviderInstallationFilesystemMirror{
 			{
-				Path: providersMirrorPath,
+				Path:    providersMirrorPath,
+				Include: []string{"example.com/*/*"},
 			},
 		},
 	}
-	createCLIConfig(t, cliConfigFilename, cliConfigSettings)
+	test.CreateCLIConfig(t, cliConfigFilename, cliConfigSettings)
 
-	runTerragrunt(t, fmt.Sprintf("terragrunt run-all init --terragrunt-provider-cache --terragrunt-provider-cache-registry-names example.com --terragrunt-provider-cache-dir %s --terragrunt-log-level trace --terragrunt-non-interactive --terragrunt-working-dir %s", providerCacheDir, appPath))
+	runTerragrunt(t, fmt.Sprintf("terragrunt run-all init --terragrunt-provider-cache --terragrunt-provider-cache-registry-names example.com --terragrunt-provider-cache-registry-names registry.opentofu.org --terragrunt-provider-cache-registry-names registry.terraform.io --terragrunt-provider-cache-dir %s --terragrunt-log-level trace --terragrunt-non-interactive --terragrunt-working-dir %s", providerCacheDir, appPath))
+
+	expectedProviderInstallation := `provider_installation { "filesystem_mirror" { path = "%s" include = ["example.com/*/*"] exclude = ["example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } "filesystem_mirror" { path = "%s" include = ["example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } "direct" { } }`
+	expectedProviderInstallation = fmt.Sprintf(strings.Join(strings.Fields(expectedProviderInstallation), " "), providersMirrorPath, providerCacheDir)
+
+	terraformrcBytes, err := os.ReadFile(filepath.Join(appPath, ".terraformrc"))
+	require.NoError(t, err)
+	terraformrc := strings.Join(strings.Fields(string(terraformrcBytes)), " ")
+
+	assert.Contains(t, terraformrc, expectedProviderInstallation, "%s\n\n%s", terraformrc, expectedProviderInstallation)
 }
 
 func TestTerragruntProviderCacheWithNetworkMirror(t *testing.T) {
 	// In this test we use os.Setenv to set the Terraform env var TF_CLI_CONFIG_FILE.
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_PROVIDER_CACHE_MIRROR)
+	cleanupTerraformFolder(t, testFixtureProviderCacheNetworkMirror)
+	tmpEnvPath := copyEnvironment(t, testFixtureProviderCacheNetworkMirror)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureProviderCacheNetworkMirror)
 
 	appPath := filepath.Join(rootPath, "app")
-	providersMirrorPath := filepath.Join(rootPath, "providers-mirror")
+	providersNetkworMirrorPath := filepath.Join(rootPath, "providers-network-mirror")
+	providersFilesystemMirrorPath := filepath.Join(rootPath, "providers-filesystem-mirror")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	fakeProvider := FakeProvider{
+	netowrkProvider := FakeProvider{
 		RegistryName: "example.com",
 		Namespace:    "hashicorp",
-		Name:         "null",
-		Version:      "3.2.2",
+		Name:         "aws",
+		Version:      "5.59.0",
 		PlatformOS:   runtime.GOOS,
 		PlatformArch: runtime.GOARCH,
 	}
-	fakeProvider.CreateMirror(t, providersMirrorPath)
+	netowrkProvider.CreateMirror(t, providersNetkworMirrorPath)
+
+	filesystemProvider := FakeProvider{
+		RegistryName: "example.com",
+		Namespace:    "hashicorp",
+		Name:         "azurerm",
+		Version:      "3.113.0",
+		PlatformOS:   runtime.GOOS,
+		PlatformArch: runtime.GOARCH,
+	}
+	filesystemProvider.CreateMirror(t, providersFilesystemMirrorPath)
 
 	// when we run NetworkMirrorServer, we override the default transport to configure the self-signed certificate, we need to restor, after finishing we need to restore this value
 	defaultTransport := http.DefaultTransport
@@ -109,9 +138,12 @@ func TestTerragruntProviderCacheWithNetworkMirror(t *testing.T) {
 		http.DefaultTransport = defaultTransport
 	}()
 
-	networkMirrorURL := runNetworkMirrorServer(t, ctx, "/providers/", providersMirrorPath)
-	t.Logf("Provdiers mirror path: %s", providersMirrorPath)
+	token := "123456790"
+
+	networkMirrorURL := runNetworkMirrorServer(t, ctx, "/providers/", providersNetkworMirrorPath, token)
 	t.Logf("Network mirror URL: %s", networkMirrorURL)
+	t.Logf("Provdiers network mirror path: %s", providersNetkworMirrorPath)
+	t.Logf("Provdiers filesysmte mirror path: %s", providersFilesystemMirrorPath)
 
 	providerCacheDir := filepath.Join(rootPath, "providers-cache")
 
@@ -119,27 +151,53 @@ func TestTerragruntProviderCacheWithNetworkMirror(t *testing.T) {
 	require.NoError(t, err)
 	defer cliConfigFilename.Close()
 
+	tokenEnvName := "TF_TOKEN_" + strings.ReplaceAll(networkMirrorURL.Hostname(), ".", "_")
+	err = os.Setenv(tokenEnvName, token)
+	require.NoError(t, err)
+	defer os.Unsetenv(tokenEnvName)
+
 	err = os.Setenv(terraform.EnvNameTFCLIConfigFile, cliConfigFilename.Name())
 	require.NoError(t, err)
 	defer os.Unsetenv(terraform.EnvNameTFCLIConfigFile)
 
 	t.Logf("%s=%s", terraform.EnvNameTFCLIConfigFile, cliConfigFilename.Name())
 
-	cliConfigSettings := &CLIConfigSettings{
-		NetworkMirrorMethods: []CLIConfigProviderInstallationNetworkMirror{
+	cliConfigSettings := &test.CLIConfigSettings{
+		DirectMethods: []test.CLIConfigProviderInstallationDirect{
 			{
-				URL: networkMirrorURL.String(),
+				Exclude: []string{"example.com/*/*"},
+			},
+		},
+		FilesystemMirrorMethods: []test.CLIConfigProviderInstallationFilesystemMirror{
+			{
+				Path:    providersFilesystemMirrorPath,
+				Include: []string{"example.com/hashicorp/azurerm"},
+			},
+		},
+		NetworkMirrorMethods: []test.CLIConfigProviderInstallationNetworkMirror{
+			{
+				URL:     networkMirrorURL.String(),
+				Exclude: []string{"example.com/hashicorp/azurerm"},
 			},
 		},
 	}
-	createCLIConfig(t, cliConfigFilename, cliConfigSettings)
+	test.CreateCLIConfig(t, cliConfigFilename, cliConfigSettings)
 
-	runTerragrunt(t, fmt.Sprintf("terragrunt run-all init --terragrunt-provider-cache --terragrunt-provider-cache-registry-names example.com --terragrunt-provider-cache-dir %s --terragrunt-log-level trace --terragrunt-non-interactive --terragrunt-working-dir %s", providerCacheDir, appPath))
+	runTerragrunt(t, fmt.Sprintf("terragrunt run-all init --terragrunt-provider-cache --terragrunt-provider-cache-registry-names example.com --terragrunt-provider-cache-registry-names registry.opentofu.org --terragrunt-provider-cache-registry-names registry.terraform.io --terragrunt-provider-cache-dir %s --terragrunt-log-level trace --terragrunt-non-interactive --terragrunt-working-dir %s", providerCacheDir, appPath))
+
+	expectedProviderInstallation := `provider_installation { "filesystem_mirror" { path = "%s" include = ["example.com/hashicorp/azurerm"] exclude = ["example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } "network_mirror" { url = "%s" exclude = ["example.com/hashicorp/azurerm", "example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } "filesystem_mirror" { path = "%s" include = ["example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } "direct" { exclude = ["example.com/*/*", "registry.opentofu.org/*/*", "registry.terraform.io/*/*"] } }`
+	expectedProviderInstallation = fmt.Sprintf(strings.Join(strings.Fields(expectedProviderInstallation), " "), providersFilesystemMirrorPath, networkMirrorURL.String(), providerCacheDir)
+
+	terraformrcBytes, err := os.ReadFile(filepath.Join(appPath, ".terraformrc"))
+	require.NoError(t, err)
+	terraformrc := strings.Join(strings.Fields(string(terraformrcBytes)), " ")
+
+	assert.Contains(t, terraformrc, expectedProviderInstallation, "%s\n\n%s", terraformrc, expectedProviderInstallation)
 }
 
 func TestTerragruntInputsFromDependency(t *testing.T) {
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_INPUTS_FROM_DEPENDENCY)
-	rootTerragruntPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_INPUTS_FROM_DEPENDENCY)
+	tmpEnvPath := copyEnvironment(t, testFixtureInputsFromDependency)
+	rootTerragruntPath := util.JoinPath(tmpEnvPath, testFixtureInputsFromDependency)
 	rootPath := util.JoinPath(rootTerragruntPath, "apps")
 
 	curDir, err := os.Getwd()
@@ -203,7 +261,7 @@ func TestTerragruntInputsFromDependency(t *testing.T) {
 
 func TestTerragruntDownloadDir(t *testing.T) {
 	cleanupTerraformFolder(t, testFixtureLocalRelativeDownloadPath)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_GET_OUTPUT)
+	tmpEnvPath := copyEnvironment(t, testFixtureGetOutput)
 
 	/* we have 2 terragrunt dirs here. One of them doesn't set the download_dir in the config,
 	the other one does. Here we'll be checking for precedence, and if the download_dir is set
@@ -218,38 +276,38 @@ func TestTerragruntDownloadDir(t *testing.T) {
 	}{
 		{
 			"download dir not set",
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "not-set"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "not-set"),
 			"", // env
 			"", // flag
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "not-set", TERRAGRUNT_CACHE),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "not-set", terragruntCache),
 		},
 		{
 			"download dir set in config",
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config"),
 			"", // env
 			"", // flag
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config", ".download"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config", ".download"),
 		},
 		{
 			"download dir set in config and in env var",
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config"),
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config", ".env-var"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config", ".env-var"),
 			"", // flag
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config", ".env-var"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config", ".env-var"),
 		},
 		{
 			"download dir set in config and as a flag",
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config"),
 			"", // env
-			fmt.Sprintf("--terragrunt-download-dir %s", util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config", ".flag-download")),
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config", ".flag-download"),
+			"--terragrunt-download-dir " + util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config", ".flag-download"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config", ".flag-download"),
 		},
 		{
 			"download dir set in config env and as a flag",
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config"),
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config", ".env-var"),
-			fmt.Sprintf("--terragrunt-download-dir %s", util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config", ".flag-download")),
-			util.JoinPath(tmpEnvPath, TEST_FIXTURE_GET_OUTPUT, "download-dir", "in-config", ".flag-download"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config", ".env-var"),
+			"--terragrunt-download-dir " + util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config", ".flag-download"),
+			util.JoinPath(tmpEnvPath, testFixtureGetOutput, "download-dir", "in-config", ".flag-download"),
 		},
 	}
 
@@ -272,7 +330,7 @@ func TestTerragruntDownloadDir(t *testing.T) {
 
 			var dat terragruntinfo.TerragruntInfoGroup
 			err_unmarshal := json.Unmarshal(stdout.Bytes(), &dat)
-			assert.NoError(t, err_unmarshal)
+			require.NoError(t, err_unmarshal)
 			// compare the results
 			assert.Equal(t, testCase.downloadDirReference, dat.DownloadDir)
 		})
@@ -280,35 +338,9 @@ func TestTerragruntDownloadDir(t *testing.T) {
 
 }
 
-func TestTerragruntCorrectlyMirrorsTerraformGCPAuth(t *testing.T) {
-	// We need to ensure Terragrunt works correctly when GOOGLE_CREDENTIALS are specified.
-	// There is no true way to properly unset env vars from the environment, but we still try
-	// to unset the CI credentials during this test.
-	defaultCreds := os.Getenv("GCLOUD_SERVICE_KEY")
-	defer os.Setenv("GCLOUD_SERVICE_KEY", defaultCreds)
-	os.Unsetenv("GCLOUD_SERVICE_KEY")
-	os.Setenv("GOOGLE_CREDENTIALS", defaultCreds)
-
-	cleanupTerraformFolder(t, TEST_FIXTURE_GCS_PATH)
-
-	// We need a project to create the bucket in, so we pull one from the recommended environment variable.
-	project := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	gcsBucketName := fmt.Sprintf("terragrunt-test-bucket-%s", strings.ToLower(uniqueId()))
-
-	defer deleteGCSBucket(t, gcsBucketName)
-
-	tmpTerragruntGCSConfigPath := createTmpTerragruntGCSConfig(t, TEST_FIXTURE_GCS_PATH, project, TERRAFORM_REMOTE_STATE_GCP_REGION, gcsBucketName, config.DefaultTerragruntConfigPath)
-	runTerragrunt(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-config %s --terragrunt-working-dir %s", tmpTerragruntGCSConfigPath, TEST_FIXTURE_GCS_PATH))
-
-	var expectedGCSLabels = map[string]string{
-		"owner": "terragrunt_test",
-		"name":  "terraform_state_storage"}
-	validateGCSBucketExistsAndIsLabeled(t, TERRAFORM_REMOTE_STATE_GCP_REGION, gcsBucketName, expectedGCSLabels)
-}
-
 func TestExtraArguments(t *testing.T) {
 	out := new(bytes.Buffer)
-	runTerragruntRedirectOutput(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s", TEST_FIXTURE_EXTRA_ARGS_PATH), out, os.Stderr)
+	runTerragruntRedirectOutput(t, "terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir "+testFixtureExtraArgsPath, out, os.Stderr)
 	t.Log(out.String())
 	assert.Contains(t, out.String(), "Hello, World from dev!")
 }
@@ -316,14 +348,14 @@ func TestExtraArguments(t *testing.T) {
 func TestExtraArgumentsWithEnv(t *testing.T) {
 	out := new(bytes.Buffer)
 	t.Setenv("TF_VAR_env", "prod")
-	runTerragruntRedirectOutput(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s", TEST_FIXTURE_EXTRA_ARGS_PATH), out, os.Stderr)
+	runTerragruntRedirectOutput(t, "terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir "+testFixtureExtraArgsPath, out, os.Stderr)
 	t.Log(out.String())
 	assert.Contains(t, out.String(), "Hello, World!")
 }
 
 func TestExtraArgumentsWithEnvVarBlock(t *testing.T) {
 	out := new(bytes.Buffer)
-	runTerragruntRedirectOutput(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s", TEST_FIXTURE_ENV_VARS_BLOCK_PATH), out, os.Stderr)
+	runTerragruntRedirectOutput(t, "terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir "+testFixtureEnvVarsBlockPath, out, os.Stderr)
 	t.Log(out.String())
 	assert.Contains(t, out.String(), "I'm set in extra_arguments env_vars")
 }
@@ -331,7 +363,7 @@ func TestExtraArgumentsWithEnvVarBlock(t *testing.T) {
 func TestExtraArgumentsWithRegion(t *testing.T) {
 	out := new(bytes.Buffer)
 	t.Setenv("TF_VAR_region", "us-west-2")
-	runTerragruntRedirectOutput(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s", TEST_FIXTURE_EXTRA_ARGS_PATH), out, os.Stderr)
+	runTerragruntRedirectOutput(t, "terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir "+testFixtureExtraArgsPath, out, os.Stderr)
 	t.Log(out.String())
 	assert.Contains(t, out.String(), "Hello, World from Oregon!")
 }
@@ -339,20 +371,20 @@ func TestExtraArgumentsWithRegion(t *testing.T) {
 func TestPreserveEnvVarApplyAll(t *testing.T) {
 	t.Setenv("TF_VAR_seed", "from the env")
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_REGRESSIONS)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_REGRESSIONS)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_REGRESSIONS, "apply-all-envvar")
+	cleanupTerraformFolder(t, testFixtureRegressions)
+	tmpEnvPath := copyEnvironment(t, testFixtureRegressions)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureRegressions, "apply-all-envvar")
 
 	stdout := bytes.Buffer{}
-	runTerragruntRedirectOutput(t, fmt.Sprintf("terragrunt apply-all -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s", rootPath), &stdout, os.Stderr)
+	runTerragruntRedirectOutput(t, "terragrunt apply-all -auto-approve --terragrunt-non-interactive --terragrunt-working-dir "+rootPath, &stdout, os.Stderr)
 	t.Log(stdout.String())
 
 	// Check the output of each child module to make sure the inputs were overridden by the env var
-	requireEnvVarModule := util.JoinPath(rootPath, "require-envvar")
+	assertEnvVarModule := util.JoinPath(rootPath, "require-envvar")
 	noRequireEnvVarModule := util.JoinPath(rootPath, "no-require-envvar")
-	for _, mod := range []string{requireEnvVarModule, noRequireEnvVarModule} {
+	for _, mod := range []string{assertEnvVarModule, noRequireEnvVarModule} {
 		stdout := bytes.Buffer{}
-		err := runTerragruntCommand(t, fmt.Sprintf("terragrunt output text -no-color --terragrunt-non-interactive --terragrunt-working-dir %s", mod), &stdout, os.Stderr)
+		err := runTerragruntCommand(t, "terragrunt output text -no-color --terragrunt-non-interactive --terragrunt-working-dir "+mod, &stdout, os.Stderr)
 		require.NoError(t, err)
 		assert.Contains(t, stdout.String(), "Hello from the env")
 	}
@@ -361,7 +393,7 @@ func TestPreserveEnvVarApplyAll(t *testing.T) {
 func TestPriorityOrderOfArgument(t *testing.T) {
 	out := new(bytes.Buffer)
 	injectedValue := "Injected-directly-by-argument"
-	runTerragruntRedirectOutput(t, fmt.Sprintf("terragrunt apply -auto-approve -var extra_var=%s --terragrunt-non-interactive --terragrunt-working-dir %s", injectedValue, TEST_FIXTURE_EXTRA_ARGS_PATH), out, os.Stderr)
+	runTerragruntRedirectOutput(t, fmt.Sprintf("terragrunt apply -auto-approve -var extra_var=%s --terragrunt-non-interactive --terragrunt-working-dir %s", injectedValue, testFixtureExtraArgsPath), out, os.Stderr)
 	t.Log(out.String())
 	// And the result value for test should be the injected variable since the injected arguments are injected before the suplied parameters,
 	// so our override of extra_var should be the last argument.
@@ -393,14 +425,14 @@ func TestTerragruntSourceMapEnvArg(t *testing.T) {
 		"TERRAGRUNT_SOURCE_MAP",
 		strings.Join(
 			[]string{
-				fmt.Sprintf("git::ssh://git@github.com/gruntwork-io/i-dont-exist.git=%s", tmpEnvPath),
-				fmt.Sprintf("git::ssh://git@github.com/gruntwork-io/another-dont-exist.git=%s", tmpEnvPath),
+				"git::ssh://git@github.com/gruntwork-io/i-dont-exist.git=" + tmpEnvPath,
+				"git::ssh://git@github.com/gruntwork-io/another-dont-exist.git=" + tmpEnvPath,
 			},
 			",",
 		),
 	)
 	tgPath := filepath.Join(rootPath, "multiple-match")
-	tgArgs := fmt.Sprintf("terragrunt run-all apply -auto-approve --terragrunt-log-level debug --terragrunt-non-interactive --terragrunt-working-dir %s", tgPath)
+	tgArgs := "terragrunt run-all apply -auto-approve --terragrunt-log-level debug --terragrunt-non-interactive --terragrunt-working-dir " + tgPath
 	runTerragrunt(t, tgArgs)
 }
 
@@ -408,9 +440,9 @@ func TestTerragruntLogLevelEnvVarOverridesDefault(t *testing.T) {
 	// NOTE: this matches logLevelEnvVar const in util/logger.go
 	t.Setenv("TERRAGRUNT_LOG_LEVEL", "debug")
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_INPUTS)
+	cleanupTerraformFolder(t, testFixtureInputs)
 	tmpEnvPath := copyEnvironment(t, ".")
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_INPUTS)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureInputs)
 
 	var (
 		stdout bytes.Buffer
@@ -419,7 +451,7 @@ func TestTerragruntLogLevelEnvVarOverridesDefault(t *testing.T) {
 
 	require.NoError(
 		t,
-		runTerragruntCommand(t, fmt.Sprintf("terragrunt validate --terragrunt-non-interactive --terragrunt-working-dir %s", rootPath), &stdout, &stderr),
+		runTerragruntCommand(t, "terragrunt validate --terragrunt-non-interactive --terragrunt-working-dir "+rootPath, &stdout, &stderr),
 	)
 	output := stderr.String()
 	assert.Contains(t, output, "level=debug")
@@ -429,124 +461,25 @@ func TestTerragruntLogLevelEnvVarUnparsableLogsErrorButContinues(t *testing.T) {
 	// NOTE: this matches logLevelEnvVar const in util/logger.go
 	t.Setenv("TERRAGRUNT_LOG_LEVEL", "unparsable")
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_INPUTS)
+	cleanupTerraformFolder(t, testFixtureInputs)
 	tmpEnvPath := copyEnvironment(t, ".")
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_INPUTS)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureInputs)
 
 	// Ideally, we would check stderr to introspect the error message, but the global fallback logger only logs to real
 	// stderr and we can't capture the output, so in this case we only make sure that the command runs successfully to
 	// completion.
-	runTerragrunt(t, fmt.Sprintf("terragrunt validate --terragrunt-non-interactive --terragrunt-working-dir %s", rootPath))
-}
-
-// NOTE: the following test requires precise timing for determining parallelism. As such, it can not be run in parallel
-// with all the other tests as the system load could impact the duration in which the parallel terragrunt goroutines
-// run.
-
-func testTerragruntParallelism(t *testing.T, parallelism int, numberOfModules int, timeToDeployEachModule time.Duration, expectedTimings []int) {
-	output, testStart, err := testRemoteFixtureParallelism(t, parallelism, numberOfModules, timeToDeployEachModule)
-	require.NoError(t, err)
-
-	// parse output and sort the times, the regex captures a string in the format time.RFC3339 emitted by terraform's timestamp function
-	regex, err := regexp.Compile(`out = "([-:\w]+)"`)
-	require.NoError(t, err)
-
-	matches := regex.FindAllStringSubmatch(output, -1)
-	require.Equal(t, numberOfModules, len(matches))
-
-	var deploymentTimes []int
-	for _, match := range matches {
-		parsedTime, err := time.Parse(time.RFC3339, match[1])
-		require.NoError(t, err)
-		deploymentTime := int(parsedTime.Unix()) - testStart
-		deploymentTimes = append(deploymentTimes, deploymentTime)
-	}
-	sort.Ints(deploymentTimes)
-
-	// the reported times are skewed (running terragrunt/terraform apply adds a little bit of overhead)
-	// we apply a simple scaling algorithm on the times based on the last expected time and the last actual time
-	scalingFactor := float64(deploymentTimes[0]) / float64(expectedTimings[0])
-	// find max skew time deploymentTimes vs expectedTimings
-	for i := 1; i < len(deploymentTimes); i++ {
-		factor := float64(deploymentTimes[i]) / float64(expectedTimings[i])
-		if factor > scalingFactor {
-			scalingFactor = factor
-		}
-	}
-	scaledTimes := make([]float64, len(deploymentTimes))
-	for i, deploymentTime := range deploymentTimes {
-		scaledTimes[i] = float64(deploymentTime) / scalingFactor
-	}
-
-	t.Logf("Parallelism test numberOfModules=%d p=%d expectedTimes=%v deploymentTimes=%v scaledTimes=%v scaleFactor=%f", numberOfModules, parallelism, expectedTimings, deploymentTimes, scaledTimes, scalingFactor)
-	maxDiffInSeconds := 5.0 * scalingFactor
-	for i, scaledTime := range scaledTimes {
-		difference := math.Abs(scaledTime - float64(expectedTimings[i]))
-		require.True(t, difference <= maxDiffInSeconds, "Expected timing %d but got %f", expectedTimings[i], scaledTime)
-	}
-}
-
-func TestTerragruntParallelism(t *testing.T) {
-	testCases := []struct {
-		parallelism            int
-		numberOfModules        int
-		timeToDeployEachModule time.Duration
-		expectedTimings        []int
-	}{
-		{1, 10, 5 * time.Second, []int{5, 10, 15, 20, 25, 30, 35, 40, 45, 50}},
-		{3, 10, 5 * time.Second, []int{5, 5, 5, 10, 10, 10, 15, 15, 15, 20}},
-		{5, 10, 5 * time.Second, []int{5, 5, 5, 5, 5, 5, 5, 5, 5, 5}},
-	}
-	for _, tc := range testCases {
-		tc := tc // shadow and force execution with this case
-		t.Run(fmt.Sprintf("parallelism=%d numberOfModules=%d timeToDeployEachModule=%v expectedTimings=%v", tc.parallelism, tc.numberOfModules, tc.timeToDeployEachModule, tc.expectedTimings), func(t *testing.T) {
-			testTerragruntParallelism(t, tc.parallelism, tc.numberOfModules, tc.timeToDeployEachModule, tc.expectedTimings)
-		})
-	}
-}
-
-func TestTerragruntWorksWithImpersonateGCSBackend(t *testing.T) {
-	impersonatorKey := os.Getenv("GCLOUD_SERVICE_KEY_IMPERSONATOR")
-	if impersonatorKey == "" {
-		t.Fatalf("Required environment variable `%s` - not found", "GCLOUD_SERVICE_KEY_IMPERSONATOR")
-	}
-	tmpImpersonatorCreds := createTmpTerragruntConfigContent(t, impersonatorKey, "impersonator-key.json")
-	defer removeFile(t, tmpImpersonatorCreds)
-	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", tmpImpersonatorCreds)
-
-	project := os.Getenv("GOOGLE_CLOUD_PROJECT")
-	gcsBucketName := fmt.Sprintf("terragrunt-test-bucket-%s", strings.ToLower(uniqueId()))
-
-	// run with impersonation
-	tmpTerragruntImpersonateGCSConfigPath := createTmpTerragruntGCSConfig(t, TEST_FIXTURE_GCS_IMPERSONATE_PATH, project, TERRAFORM_REMOTE_STATE_GCP_REGION, gcsBucketName, config.DefaultTerragruntConfigPath)
-	runTerragrunt(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-config %s --terragrunt-working-dir %s", tmpTerragruntImpersonateGCSConfigPath, TEST_FIXTURE_GCS_IMPERSONATE_PATH))
-
-	var expectedGCSLabels = map[string]string{
-		"owner": "terragrunt_test",
-		"name":  "terraform_state_storage"}
-	validateGCSBucketExistsAndIsLabeled(t, TERRAFORM_REMOTE_STATE_GCP_REGION, gcsBucketName, expectedGCSLabels)
-
-	email := os.Getenv("GOOGLE_IDENTITY_EMAIL")
-	attrs := gcsObjectAttrs(t, gcsBucketName, "terraform.tfstate/default.tfstate")
-	ownerEmail := false
-	for _, a := range attrs.ACL {
-		if (a.Role == "OWNER") && (a.Email == email) {
-			ownerEmail = true
-			break
-		}
-	}
-	assert.True(t, ownerEmail, "Identity email should match the impersonated account")
+	runTerragrunt(t, "terragrunt validate --terragrunt-non-interactive --terragrunt-working-dir "+rootPath)
 }
 
 func TestTerragruntProduceTelemetryTraces(t *testing.T) {
 	t.Setenv("TERRAGRUNT_TELEMETRY_TRACE_EXPORTER", "console")
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
+	cleanupTerraformFolder(t, testFixtureHooksBeforeAndAfterPath)
+	tmpEnvPath := copyEnvironment(t, testFixtureHooksBeforeAndAfterPath)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureHooksBeforeAndAfterPath)
 
-	output, _, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s", rootPath))
-	assert.NoError(t, err)
+	output, _, err := runTerragruntCommandWithOutput(t, "terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir "+rootPath)
+	require.NoError(t, err)
 
 	// check that output have Telemetry json output
 	assert.Contains(t, output, "\"SpanContext\":")
@@ -558,12 +491,12 @@ func TestTerragruntProduceTelemetryTraces(t *testing.T) {
 func TestTerragruntProduceTelemetryMetrics(t *testing.T) {
 	t.Setenv("TERRAGRUNT_TELEMETRY_METRIC_EXPORTER", "console")
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
+	cleanupTerraformFolder(t, testFixtureHooksBeforeAndAfterPath)
+	tmpEnvPath := copyEnvironment(t, testFixtureHooksBeforeAndAfterPath)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureHooksBeforeAndAfterPath)
 
-	output, _, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt apply -no-color -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s", rootPath))
-	assert.NoError(t, err)
+	output, _, err := runTerragruntCommandWithOutput(t, "terragrunt apply -no-color -auto-approve --terragrunt-non-interactive --terragrunt-working-dir "+rootPath)
+	require.NoError(t, err)
 
 	// sleep for a bit to allow the metrics to be flushed
 	time.Sleep(1 * time.Second)
@@ -580,19 +513,20 @@ func TestTerragruntOutputJson(t *testing.T) {
 		util.DisableJsonFormat()
 	}()
 
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_NOT_EXISTING_SOURCE)
+	tmpEnvPath := copyEnvironment(t, testFixtureNotExistingSource)
 	cleanupTerraformFolder(t, tmpEnvPath)
-	testPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_NOT_EXISTING_SOURCE)
+	testPath := util.JoinPath(tmpEnvPath, testFixtureNotExistingSource)
 
-	_, stderr, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt apply --terragrunt-json-log --terragrunt-non-interactive --terragrunt-working-dir %s", testPath))
-	assert.Error(t, err)
-
-	var msgs []string
+	_, stderr, err := runTerragruntCommandWithOutput(t, "terragrunt apply --terragrunt-json-log --terragrunt-non-interactive --terragrunt-working-dir "+testPath)
+	require.Error(t, err)
 
 	// for windows OS
 	output := bytes.ReplaceAll([]byte(stderr), []byte("\r\n"), []byte("\n"))
 
 	multipeJSONs := bytes.Split(output, []byte("\n"))
+
+	var msgs = make([]string, 0, len(multipeJSONs))
+
 	for _, jsonBytes := range multipeJSONs {
 		if len(jsonBytes) == 0 {
 			continue
@@ -601,7 +535,7 @@ func TestTerragruntOutputJson(t *testing.T) {
 		var output map[string]interface{}
 
 		err = json.Unmarshal(jsonBytes, &output)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		msg, ok := output["msg"].(string)
 		assert.True(t, ok)
@@ -613,18 +547,16 @@ func TestTerragruntOutputJson(t *testing.T) {
 
 func TestTerragruntTerraformOutputJson(t *testing.T) {
 	// no parallel test execution since JSON output is global
-	defer func() {
-		util.DisableJsonFormat()
-	}()
+	defer util.DisableJsonFormat()
 
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_INIT_ERROR)
+	tmpEnvPath := copyEnvironment(t, testFixtureInitError)
 	cleanupTerraformFolder(t, tmpEnvPath)
-	testPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_INIT_ERROR)
+	testPath := util.JoinPath(tmpEnvPath, testFixtureInitError)
 
-	_, stderr, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt apply --no-color --terragrunt-json-log --terragrunt-tf-logs-to-json --terragrunt-non-interactive --terragrunt-working-dir %s", testPath))
-	assert.Error(t, err)
+	_, stderr, err := runTerragruntCommandWithOutput(t, "terragrunt apply --no-color --terragrunt-json-log --terragrunt-tf-logs-to-json --terragrunt-non-interactive --terragrunt-forward-tf-stdout --terragrunt-working-dir "+testPath)
+	require.Error(t, err)
 
-	assert.Contains(t, stderr, "\"level\":\"info\",\"msg\":\"Initializing the backend...")
+	assert.Contains(t, stderr, "\"msg\":\"Initializing the backend...")
 
 	// check if output can be extracted in json
 	jsonStrings := strings.Split(stderr, "\n")
@@ -634,7 +566,7 @@ func TestTerragruntTerraformOutputJson(t *testing.T) {
 		}
 		var output map[string]interface{}
 		err = json.Unmarshal([]byte(jsonString), &output)
-		assert.NoErrorf(t, err, "Failed to parse json %s", jsonString)
+		require.NoErrorf(t, err, "Failed to parse json %s", jsonString)
 		assert.NotNil(t, output["level"])
 		assert.NotNil(t, output["time"])
 	}
@@ -647,24 +579,24 @@ func TestTerragruntOutputFromDependencyLogsJson(t *testing.T) {
 	}{
 		{"--terragrunt-json-log"},
 		{"--terragrunt-json-log --terragrunt-tf-logs-to-json"},
-		{"--terragrunt-include-module-prefix"},
-		{"--terragrunt-json-log --terragrunt-tf-logs-to-json --terragrunt-include-module-prefix"},
+		{"--terragrunt-forward-tf-stdout"},
+		{"--terragrunt-json-log --terragrunt-tf-logs-to-json --terragrunt-forward-tf-stdout"},
 	}
 	for _, testCase := range testCases {
 		testCase := testCase
-		t.Run(fmt.Sprintf("terragrunt output with %s", testCase.arg), func(t *testing.T) {
+		t.Run("terragrunt output with "+testCase.arg, func(t *testing.T) {
 			defer func() {
 				util.DisableJsonFormat()
 			}()
-			tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_DEPENDENCY_OUTPUT)
-			rootTerragruntPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_DEPENDENCY_OUTPUT)
+			tmpEnvPath := copyEnvironment(t, testFixtureDependencyOutput)
+			rootTerragruntPath := util.JoinPath(tmpEnvPath, testFixtureDependencyOutput)
 			// apply dependency first
 			dependencyTerragruntConfigPath := util.JoinPath(rootTerragruntPath, "dependency")
 			_, _, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s ", dependencyTerragruntConfigPath))
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			appTerragruntConfigPath := util.JoinPath(rootTerragruntPath, "app")
 			stdout, stderr, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt plan --terragrunt-non-interactive --terragrunt-working-dir %s %s", appTerragruntConfigPath, testCase.arg))
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			output := fmt.Sprintf("%s %s", stderr, stdout)
 			assert.NotContains(t, output, "invalid character")
 		})
@@ -679,12 +611,12 @@ func TestTerragruntJsonPlanJsonOutput(t *testing.T) {
 	}{
 		{"--terragrunt-json-log"},
 		{"--terragrunt-json-log --terragrunt-tf-logs-to-json"},
-		{"--terragrunt-include-module-prefix"},
-		{"--terragrunt-json-log --terragrunt-tf-logs-to-json --terragrunt-include-module-prefix"},
+		{"--terragrunt-forward-tf-stdout"},
+		{"--terragrunt-json-log --terragrunt-tf-logs-to-json --terragrunt-forward-tf-stdout"},
 	}
 	for _, testCase := range testCases {
 		testCase := testCase
-		t.Run(fmt.Sprintf("terragrunt with %s", testCase.arg), func(t *testing.T) {
+		t.Run("terragrunt with "+testCase.arg, func(t *testing.T) {
 			defer func() {
 				util.DisableJsonFormat()
 			}()
@@ -693,7 +625,7 @@ func TestTerragruntJsonPlanJsonOutput(t *testing.T) {
 			require.NoError(t, err)
 			list, err := findFilesWithExtension(tmpDir, ".json")
 			require.NoError(t, err)
-			assert.Equal(t, 2, len(list))
+			assert.Len(t, list, 2)
 			for _, file := range list {
 				assert.Equal(t, "tfplan.json", filepath.Base(file))
 				// verify that file is not empty
@@ -716,12 +648,12 @@ func TestTerragruntProduceTelemetryTracesWithRootSpanAndTraceID(t *testing.T) {
 	t.Setenv("TERRAGRUNT_TELEMETRY_TRACE_EXPORTER", "console")
 	t.Setenv("TRACEPARENT", "00-b2ff2d54551433d53dd807a6c94e81d1-0e6f631d793c718a-01")
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
+	cleanupTerraformFolder(t, testFixtureHooksBeforeAndAfterPath)
+	tmpEnvPath := copyEnvironment(t, testFixtureHooksBeforeAndAfterPath)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureHooksBeforeAndAfterPath)
 
-	output, _, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s", rootPath))
-	assert.NoError(t, err)
+	output, _, err := runTerragruntCommandWithOutput(t, "terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-working-dir "+rootPath)
+	require.NoError(t, err)
 
 	// check that output have Telemetry json output
 	assert.Contains(t, output, "\"SpanContext\":{\"TraceID\":\"b2ff2d54551433d53dd807a6c94e81d1\"")
@@ -736,11 +668,11 @@ func TestTerragruntProduceTelemetryInCasOfError(t *testing.T) {
 	t.Setenv("TERRAGRUNT_TELEMETRY_TRACE_EXPORTER", "console")
 	t.Setenv("TRACEPARENT", "00-b2ff2d54551433d53dd807a6c94e81d1-0e6f631d793c718a-01")
 
-	cleanupTerraformFolder(t, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_HOOKS_BEFORE_AND_AFTER_PATH)
+	cleanupTerraformFolder(t, testFixtureHooksBeforeAndAfterPath)
+	tmpEnvPath := copyEnvironment(t, testFixtureHooksBeforeAndAfterPath)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureHooksBeforeAndAfterPath)
 
-	output, _, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terragrunt no-existing-command -auto-approve --terragrunt-non-interactive --terragrunt-working-dir %s", rootPath))
+	output, _, err := runTerragruntCommandWithOutput(t, "terragrunt no-existing-command -auto-approve --terragrunt-non-interactive --terragrunt-working-dir "+rootPath)
 	require.Error(t, err)
 
 	assert.Contains(t, output, "\"SpanContext\":{\"TraceID\":\"b2ff2d54551433d53dd807a6c94e81d1\"")
@@ -751,9 +683,9 @@ func TestTerragruntProduceTelemetryInCasOfError(t *testing.T) {
 
 // Since this test launches a large number of terraform processes, which sometimes fails with the message `Failed to write to log, write |1: file already closed`, for stability, we need to run it not parallel.
 func TestTerragruntProviderCache(t *testing.T) {
-	cleanupTerraformFolder(t, TEST_FIXTURE_PROVIDER_CACHE_DIRECT)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_PROVIDER_CACHE_DIRECT)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_PROVIDER_CACHE_DIRECT)
+	cleanupTerraformFolder(t, testFixtureProviderCacheDirect)
+	tmpEnvPath := copyEnvironment(t, testFixtureProviderCacheDirect)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureProviderCacheDirect)
 
 	cacheDir, err := util.GetCacheDir()
 	require.NoError(t, err)
@@ -762,11 +694,11 @@ func TestTerragruntProviderCache(t *testing.T) {
 	runTerragrunt(t, fmt.Sprintf("terragrunt run-all init --terragrunt-provider-cache --terragrunt-provider-cache-dir %s --terragrunt-log-level trace --terragrunt-non-interactive --terragrunt-working-dir %s", providerCacheDir, rootPath))
 
 	providers := map[string][]string{
-		"first": []string{
+		"first": {
 			"hashicorp/aws/5.36.0",
 			"hashicorp/azurerm/3.95.0",
 		},
-		"second": []string{
+		"second": {
 			"hashicorp/aws/5.40.0",
 			"hashicorp/azurerm/3.95.0",
 			"hashicorp/kubernetes/2.27.0",
@@ -802,7 +734,7 @@ func TestTerragruntProviderCache(t *testing.T) {
 			require.NoError(t, err)
 
 			lockfile, diags := hclwrite.ParseConfig(lockfileContent, lockfilePath, hcl.Pos{Line: 1, Column: 1})
-			require.False(t, diags.HasErrors())
+			assert.False(t, diags.HasErrors())
 
 			for _, provider := range providers {
 				var (
@@ -818,7 +750,7 @@ func TestTerragruntProviderCache(t *testing.T) {
 				assert.True(t, util.FileExists(providerPath))
 
 				entries, err := os.ReadDir(providerPath)
-				assert.NoError(t, err)
+				require.NoError(t, err)
 
 				for _, entry := range entries {
 					actualProviderSymlinks++
@@ -827,7 +759,7 @@ func TestTerragruntProviderCache(t *testing.T) {
 					symlinkPath := filepath.Join(providerPath, entry.Name())
 
 					actualPath, err := os.Readlink(symlinkPath)
-					assert.NoError(t, err)
+					require.NoError(t, err)
 
 					expectedPath := filepath.Join(providerCacheDir, provider, entry.Name())
 					assert.Contains(t, actualPath, expectedPath)
@@ -840,16 +772,16 @@ func TestTerragruntProviderCache(t *testing.T) {
 }
 
 func TestReadTerragruntAuthProviderCmdRemoteState(t *testing.T) {
-	cleanupTerraformFolder(t, TEST_FIXTURE_AUTH_PROVIDER_CMD)
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_AUTH_PROVIDER_CMD)
-	rootPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_AUTH_PROVIDER_CMD, "remote-state")
-	mockAuthCmd := filepath.Join(tmpEnvPath, TEST_FIXTURE_AUTH_PROVIDER_CMD, "mock-auth-cmd.sh")
+	cleanupTerraformFolder(t, testFixtureAuthProviderCmd)
+	tmpEnvPath := copyEnvironment(t, testFixtureAuthProviderCmd)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureAuthProviderCmd, "remote-state")
+	mockAuthCmd := filepath.Join(tmpEnvPath, testFixtureAuthProviderCmd, "mock-auth-cmd.sh")
 
-	s3BucketName := fmt.Sprintf("terragrunt-test-bucket-%s", strings.ToLower(uniqueId()))
-	defer deleteS3Bucket(t, TERRAFORM_REMOTE_STATE_S3_REGION, s3BucketName)
+	s3BucketName := "terragrunt-test-bucket-" + strings.ToLower(uniqueId())
+	defer deleteS3Bucket(t, terraformRemoteStateS3Region, s3BucketName)
 
 	rootTerragruntConfigPath := util.JoinPath(rootPath, config.DefaultTerragruntConfigPath)
-	copyTerragruntConfigAndFillPlaceholders(t, rootTerragruntConfigPath, rootTerragruntConfigPath, s3BucketName, "not-used", TERRAFORM_REMOTE_STATE_S3_REGION)
+	copyTerragruntConfigAndFillPlaceholders(t, rootTerragruntConfigPath, rootTerragruntConfigPath, s3BucketName, "not-used", terraformRemoteStateS3Region)
 
 	accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID")
 	secretAccessKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
@@ -861,9 +793,9 @@ func TestReadTerragruntAuthProviderCmdRemoteState(t *testing.T) {
 		os.Setenv("AWS_SECRET_ACCESS_KEY", secretAccessKey)
 	}()
 
-	creadsConfig := util.JoinPath(rootPath, "creds.config")
+	credsConfig := util.JoinPath(rootPath, "creds.config")
 
-	copyAndFillMapPlaceholders(t, creadsConfig, creadsConfig, map[string]string{
+	copyAndFillMapPlaceholders(t, credsConfig, credsConfig, map[string]string{
 		"__FILL_AWS_ACCESS_KEY_ID__":     accessKeyID,
 		"__FILL_AWS_SECRET_ACCESS_KEY__": secretAccessKey,
 	})
@@ -871,4 +803,32 @@ func TestReadTerragruntAuthProviderCmdRemoteState(t *testing.T) {
 	runTerragrunt(t, fmt.Sprintf("terragrunt plan --terragrunt-non-interactive --terragrunt-working-dir %s --terragrunt-auth-provider-cmd %s", rootPath, mockAuthCmd))
 }
 
-// @SONAR_START@
+func TestReadTerragruntAuthProviderCmdCredsForDependency(t *testing.T) {
+	cleanupTerraformFolder(t, testFixtureAuthProviderCmd)
+	tmpEnvPath := copyEnvironment(t, testFixtureAuthProviderCmd)
+	rootPath := util.JoinPath(tmpEnvPath, testFixtureAuthProviderCmd, "creds-for-dependency")
+	mockAuthCmd := filepath.Join(tmpEnvPath, testFixtureAuthProviderCmd, "mock-auth-cmd.sh")
+
+	accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretAccessKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	os.Setenv("AWS_ACCESS_KEY_ID", "")
+	os.Setenv("AWS_SECRET_ACCESS_KEY", "")
+
+	defer func() {
+		os.Setenv("AWS_ACCESS_KEY_ID", accessKeyID)
+		os.Setenv("AWS_SECRET_ACCESS_KEY", secretAccessKey)
+	}()
+
+	dependencyCredsConfig := util.JoinPath(rootPath, "dependency", "creds.config")
+	copyAndFillMapPlaceholders(t, dependencyCredsConfig, dependencyCredsConfig, map[string]string{
+		"__FILL_AWS_ACCESS_KEY_ID__":     accessKeyID,
+		"__FILL_AWS_SECRET_ACCESS_KEY__": secretAccessKey,
+	})
+
+	dependentCredsConfig := util.JoinPath(rootPath, "dependent", "creds.config")
+	copyAndFillMapPlaceholders(t, dependentCredsConfig, dependentCredsConfig, map[string]string{
+		"__FILL_AWS_ACCESS_KEY_ID__":     accessKeyID,
+		"__FILL_AWS_SECRET_ACCESS_KEY__": secretAccessKey,
+	})
+	runTerragrunt(t, fmt.Sprintf("terragrunt run-all apply --terragrunt-non-interactive --terragrunt-working-dir %s --terragrunt-auth-provider-cmd %s", rootPath, mockAuthCmd))
+}

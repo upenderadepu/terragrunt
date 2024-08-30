@@ -1,5 +1,5 @@
 // common integration test functions
-package test
+package test_test
 
 import (
 	"archive/zip"
@@ -24,7 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gruntwork-io/terragrunt/cli/commands/terraform"
+
 	"github.com/gruntwork-io/terragrunt/util"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/NYTimes/gziphandler"
@@ -33,9 +36,9 @@ import (
 func testRunAllPlan(t *testing.T, args string) (string, string, string, error) {
 	t.Helper()
 
-	tmpEnvPath := copyEnvironment(t, TEST_FIXTURE_OUT_DIR)
+	tmpEnvPath := copyEnvironment(t, testFixtureOutDir)
 	cleanupTerraformFolder(t, tmpEnvPath)
-	testPath := util.JoinPath(tmpEnvPath, TEST_FIXTURE_OUT_DIR)
+	testPath := util.JoinPath(tmpEnvPath, testFixtureOutDir)
 
 	// run plan with output directory
 	stdout, stderr, err := runTerragruntCommandWithOutput(t, fmt.Sprintf("terraform run-all plan --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir %s %s", testPath, args))
@@ -43,7 +46,9 @@ func testRunAllPlan(t *testing.T, args string) (string, string, string, error) {
 	return tmpEnvPath, stdout, stderr, err
 }
 
-func runNetworkMirrorServer(t *testing.T, ctx context.Context, urlPrefix, providerDir string) *url.URL {
+func runNetworkMirrorServer(t *testing.T, ctx context.Context, urlPrefix, providerDir, token string) *url.URL {
+	t.Helper()
+
 	serverTLSConf, clientTLSConf := certSetup(t)
 
 	http.DefaultTransport = &http.Transport{
@@ -56,7 +61,14 @@ func runNetworkMirrorServer(t *testing.T, ctx context.Context, urlPrefix, provid
 
 	withGz := gziphandler.GzipHandler(http.StripPrefix(urlPrefix, fs))
 
-	mux.Handle(urlPrefix, withGz)
+	mux.HandleFunc(urlPrefix, func(resp http.ResponseWriter, req *http.Request) {
+		if token != "" {
+			authHeaders := req.Header.Values("Authorization")
+			assert.Contains(t, authHeaders, "Bearer "+token)
+		}
+
+		withGz.ServeHTTP(resp, req)
+	})
 
 	ln, err := tls.Listen("tcp", "localhost:8888", serverTLSConf)
 	require.NoError(t, err)
@@ -99,6 +111,8 @@ func (provider *FakeProvider) filename() string {
 }
 
 func (provider *FakeProvider) CreateMirror(t *testing.T, rootDir string) {
+	t.Helper()
+
 	providerDir := filepath.Join(rootDir, provider.RegistryName, provider.Namespace, provider.Name)
 
 	err := os.MkdirAll(providerDir, os.ModePerm)
@@ -110,6 +124,8 @@ func (provider *FakeProvider) CreateMirror(t *testing.T, rootDir string) {
 }
 
 func (provider *FakeProvider) createVersionJSON(t *testing.T, providerDir string) {
+	t.Helper()
+
 	type VersionProvider struct {
 		Hashes []string `json:"hashes"`
 		URL    string   `json:"url"`
@@ -119,7 +135,7 @@ func (provider *FakeProvider) createVersionJSON(t *testing.T, providerDir string
 	}
 
 	version := &Version{Archives: make(map[string]VersionProvider)}
-	filename := filepath.Join(providerDir, fmt.Sprintf("%s.json", provider.Version))
+	filename := filepath.Join(providerDir, provider.Version+".json")
 	platform := fmt.Sprintf("%s_%s", provider.PlatformOS, provider.PlatformArch)
 
 	unmarshalFile(t, filename, version)
@@ -128,6 +144,8 @@ func (provider *FakeProvider) createVersionJSON(t *testing.T, providerDir string
 }
 
 func (provider *FakeProvider) createIndexJSON(t *testing.T, providerDir string) {
+	t.Helper()
+
 	type Index struct {
 		Versions map[string]any `json:"versions"`
 	}
@@ -141,6 +159,8 @@ func (provider *FakeProvider) createIndexJSON(t *testing.T, providerDir string) 
 }
 
 func (provider *FakeProvider) createZipArchive(t *testing.T, providerDir string) {
+	t.Helper()
+
 	file, err := os.Create(filepath.Join(providerDir, provider.filename()))
 	require.NoError(t, err)
 	defer func() {
@@ -178,6 +198,8 @@ func (provider *FakeProvider) createZipArchive(t *testing.T, providerDir string)
 }
 
 func unmarshalFile(t *testing.T, filename string, dest any) {
+	t.Helper()
+
 	if !util.FileExists(filename) {
 		return
 	}
@@ -189,6 +211,8 @@ func unmarshalFile(t *testing.T, filename string, dest any) {
 }
 
 func marshalFile(t *testing.T, filename string, dest any) {
+	t.Helper()
+
 	data, err := json.Marshal(dest)
 	require.NoError(t, err)
 	err = os.WriteFile(filename, data, 0666)
@@ -196,6 +220,8 @@ func marshalFile(t *testing.T, filename string, dest any) {
 }
 
 func certSetup(t *testing.T) (*tls.Config, *tls.Config) {
+	t.Helper()
+
 	// set up our CA certificate
 	serialNumber, err := strconv.ParseInt(time.Now().Format("20060102150405"), 10, 64)
 	require.NoError(t, err)
@@ -286,8 +312,56 @@ func certSetup(t *testing.T) (*tls.Config, *tls.Config) {
 	certpool := x509.NewCertPool()
 	certpool.AppendCertsFromPEM(caPEM.Bytes())
 	clientTLSConf := &tls.Config{
-		RootCAs: certpool,
+		RootCAs:            certpool,
+		InsecureSkipVerify: true,
 	}
 
 	return serverTLSConf, clientTLSConf
+}
+
+func validateOutput(t *testing.T, outputs map[string]TerraformOutput, key string, value interface{}) {
+	t.Helper()
+	output, hasPlatform := outputs[key]
+	assert.Truef(t, hasPlatform, "Expected output %s to be defined", key)
+	assert.Equalf(t, output.Value, value, "Expected output %s to be %t", key, value)
+}
+
+// wrappedBinary - return which binary will be wrapped by Terragrunt, useful in CICD to run same tests against tofu and terraform
+func wrappedBinary() string {
+	value, found := os.LookupEnv("TERRAGRUNT_TFPATH")
+	if !found {
+		// if env variable is not defined, try to check through executing command
+		if util.IsCommandExecutable(tofuBinary, "-version") {
+			return tofuBinary
+		}
+		return terraformBinary
+	}
+	return filepath.Base(value)
+}
+
+// expectedWrongCommandErr - return expected error message for wrong command
+func expectedWrongCommandErr(command string) error {
+	if wrappedBinary() == tofuBinary {
+		return terraform.WrongTofuCommand(command)
+	}
+	return terraform.WrongTerraformCommand(command)
+}
+
+func isTerraform() bool {
+	return wrappedBinary() == terraformBinary
+}
+
+func findFilesWithExtension(dir string, ext string) ([]string, error) {
+	var files []string
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && filepath.Ext(path) == ext {
+			files = append(files, path)
+		}
+		return nil
+	})
+
+	return files, err
 }

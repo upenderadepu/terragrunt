@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/json"
+	goErrors "errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -91,9 +92,11 @@ func (gcsInitializer GCSInitializer) NeedsInitialization(remoteState *RemoteStat
 	}
 
 	project := remoteState.Config["project"]
-	if !gcsConfigValuesEqual(remoteState.Config, existingBackend, terragruntOptions) {
+
+	if !GCSConfigValuesEqual(remoteState.Config, existingBackend, terragruntOptions) {
 		return true, nil
 	}
+
 	if project != nil {
 		remoteState.Config["project"] = project
 	}
@@ -111,6 +114,7 @@ func (gcsInitializer GCSInitializer) NeedsInitialization(remoteState *RemoteStat
 	if !DoesGCSBucketExist(gcsClient, gcsConfig) {
 		return true, nil
 	}
+
 	if project != nil {
 		delete(remoteState.Config, "project")
 	}
@@ -119,7 +123,7 @@ func (gcsInitializer GCSInitializer) NeedsInitialization(remoteState *RemoteStat
 }
 
 // Return true if the given config is in any way different than what is configured for the backend
-func gcsConfigValuesEqual(config map[string]interface{}, existingBackend *TerraformBackend, terragruntOptions *options.TerragruntOptions) bool {
+func GCSConfigValuesEqual(config map[string]interface{}, existingBackend *TerraformBackend, terragruntOptions *options.TerragruntOptions) bool {
 	if existingBackend == nil {
 		return len(config) == 0
 	}
@@ -180,7 +184,7 @@ func (gcsInitializer GCSInitializer) Initialize(ctx context.Context, remoteState
 	var gcsConfig = gcsConfigExtended.remoteStateConfigGCS
 
 	cacheKey := gcsInitializer.buildInitializerCacheKey(&gcsConfig)
-	if initialized, hit := initializedRemoteStateCache.Get(cacheKey); initialized && hit {
+	if initialized, hit := initializedRemoteStateCache.Get(ctx, cacheKey); initialized && hit {
 		terragruntOptions.Logger.Debugf("GCS bucket %s has already been confirmed to be initialized, skipping initialization checks", gcsConfig.Bucket)
 		return nil
 	}
@@ -188,12 +192,13 @@ func (gcsInitializer GCSInitializer) Initialize(ctx context.Context, remoteState
 	// ensure that only one goroutine can initialize bucket
 	return stateAccessLock.StateBucketUpdate(gcsConfig.Bucket, func() error {
 		// check if another goroutine has already initialized the bucket
-		if initialized, hit := initializedRemoteStateCache.Get(cacheKey); initialized && hit {
+		if initialized, hit := initializedRemoteStateCache.Get(ctx, cacheKey); initialized && hit {
 			terragruntOptions.Logger.Debugf("GCS bucket %s has already been confirmed to be initialized, skipping initialization checks", gcsConfig.Bucket)
 			return nil
 		}
 
-		gcsClient, err := CreateGCSClient(gcsConfig)
+		// TODO: Remove lint suppression
+		gcsClient, err := CreateGCSClient(gcsConfig) //nolint:contextcheck
 		if err != nil {
 			return err
 		}
@@ -206,12 +211,13 @@ func (gcsInitializer GCSInitializer) Initialize(ctx context.Context, remoteState
 		}
 		// If bucket is specified and skip_bucket_versioning is false then warn user if versioning is disabled on bucket
 		if !gcsConfigExtended.SkipBucketVersioning && gcsConfig.Bucket != "" {
-			if err := checkIfGCSVersioningEnabled(gcsClient, &gcsConfig, terragruntOptions); err != nil {
+			// TODO: Remove lint suppression
+			if err := checkIfGCSVersioningEnabled(gcsClient, &gcsConfig, terragruntOptions); err != nil { //nolint:contextcheck
 				return err
 			}
 		}
 
-		initializedRemoteStateCache.Put(cacheKey, true)
+		initializedRemoteStateCache.Put(ctx, cacheKey, true)
 
 		return nil
 	})
@@ -243,8 +249,10 @@ func parseGCSConfig(config map[string]interface{}) (*RemoteStateConfigGCS, error
 
 // Parse the given map into a GCS config
 func parseExtendedGCSConfig(config map[string]interface{}) (*ExtendedRemoteStateConfigGCS, error) {
-	var gcsConfig RemoteStateConfigGCS
-	var extendedConfig ExtendedRemoteStateConfigGCS
+	var (
+		gcsConfig      RemoteStateConfigGCS
+		extendedConfig ExtendedRemoteStateConfigGCS
+	)
 
 	if err := mapstructure.Decode(config, &gcsConfig); err != nil {
 		return nil, errors.WithStackTrace(err)
@@ -273,7 +281,8 @@ func validateGCSConfig(extendedConfig *ExtendedRemoteStateConfigGCS) error {
 // If the bucket specified in the given config doesn't already exist, prompt the user to create it, and if the user
 // confirms, create the bucket and enable versioning for it.
 func createGCSBucketIfNecessary(ctx context.Context, gcsClient *storage.Client, config *ExtendedRemoteStateConfigGCS, terragruntOptions *options.TerragruntOptions) error {
-	if !DoesGCSBucketExist(gcsClient, &config.remoteStateConfigGCS) {
+	// TODO: Remove lint suppression
+	if !DoesGCSBucketExist(gcsClient, &config.remoteStateConfigGCS) { //nolint:contextcheck
 		terragruntOptions.Logger.Debugf("Remote state GCS bucket %s does not exist. Attempting to create it", config.remoteStateConfigGCS.Bucket)
 
 		// A project must be specified in order for terragrunt to automatically create a storage bucket.
@@ -291,6 +300,7 @@ func createGCSBucketIfNecessary(ctx context.Context, gcsClient *storage.Client, 
 		}
 
 		prompt := fmt.Sprintf("Remote state GCS bucket %s does not exist or you don't have permissions to access it. Would you like Terragrunt to create it?", config.remoteStateConfigGCS.Bucket)
+
 		shouldCreateBucket, err := shell.PromptUserForYesNo(prompt, terragruntOptions)
 		if err != nil {
 			return err
@@ -298,10 +308,11 @@ func createGCSBucketIfNecessary(ctx context.Context, gcsClient *storage.Client, 
 
 		if shouldCreateBucket {
 			// To avoid any eventual consistency issues with creating a GCS bucket we use a retry loop.
-			description := fmt.Sprintf("Create GCS bucket %s", config.remoteStateConfigGCS.Bucket)
+			description := "Create GCS bucket " + config.remoteStateConfigGCS.Bucket
 
 			return util.DoWithRetry(ctx, description, gcpMaxRetries, gcpSleepBetweenRetries, logrus.DebugLevel, func(ctx context.Context) error {
-				return CreateGCSBucketWithVersioning(gcsClient, config, terragruntOptions)
+				// TODO: Remove lint suppression
+				return CreateGCSBucketWithVersioning(gcsClient, config, terragruntOptions) //nolint:contextcheck
 			})
 		}
 	}
@@ -370,7 +381,6 @@ func AddLabelsToGCSBucket(gcsClient *storage.Client, config *ExtendedRemoteState
 	}
 
 	return nil
-
 }
 
 // Create the GCS bucket specified in the given config
@@ -396,15 +406,18 @@ func CreateGCSBucket(gcsClient *storage.Client, config *ExtendedRemoteStateConfi
 		terragruntOptions.Logger.Debugf("Versioning is disabled for the remote state GCS bucket %s using 'skip_bucket_versioning' config.", config.remoteStateConfigGCS.Bucket)
 	} else {
 		terragruntOptions.Logger.Debugf("Enabling versioning on GCS bucket %s", config.remoteStateConfigGCS.Bucket)
+
 		bucketAttrs.VersioningEnabled = true
 	}
 
 	if config.EnableBucketPolicyOnly {
 		terragruntOptions.Logger.Debugf("Enabling uniform bucket-level access on GCS bucket %s", config.remoteStateConfigGCS.Bucket)
+
 		bucketAttrs.BucketPolicyOnly = storage.BucketPolicyOnly{Enabled: true}
 	}
 
 	err := bucket.Create(ctx, projectID, bucketAttrs)
+
 	return errors.WithStackTraceAndPrefix(err, "Error creating GCS bucket %s", config.remoteStateConfigGCS.Bucket)
 }
 
@@ -412,6 +425,7 @@ func CreateGCSBucket(gcsClient *storage.Client, config *ExtendedRemoteStateConfi
 // about that GCS bucket has propagated everywhere.
 func WaitUntilGCSBucketExists(gcsClient *storage.Client, config *RemoteStateConfigGCS, terragruntOptions *options.TerragruntOptions) error {
 	terragruntOptions.Logger.Debugf("Waiting for bucket %s to be created", config.Bucket)
+
 	for retries := 0; retries < MAX_RETRIES_WAITING_FOR_GCS_BUCKET; retries++ {
 		if DoesGCSBucketExist(gcsClient, config) {
 			terragruntOptions.Logger.Debugf("GCS bucket %s created.", config.Bucket)
@@ -443,7 +457,7 @@ func DoesGCSBucketExist(gcsClient *storage.Client, config *RemoteStateConfigGCS)
 	}
 
 	it := bucket.Objects(ctx, nil)
-	if _, err := it.Next(); err == storage.ErrBucketNotExist {
+	if _, err := it.Next(); goErrors.Is(err, storage.ErrBucketNotExist) {
 		return false
 	}
 
@@ -453,6 +467,7 @@ func DoesGCSBucketExist(gcsClient *storage.Client, config *RemoteStateConfigGCS)
 // CreateGCSClient creates an authenticated client for GCS
 func CreateGCSClient(gcsConfigRemote RemoteStateConfigGCS) (*storage.Client, error) {
 	ctx := context.Background()
+
 	var opts []option.ClientOption
 
 	if gcsConfigRemote.Credentials != "" {
@@ -471,17 +486,18 @@ func CreateGCSClient(gcsConfigRemote RemoteStateConfigGCS) (*storage.Client, err
 		var account accountFile
 		// to mirror how Terraform works, we have to accept either the file path or the contents
 		creds := os.Getenv("GOOGLE_CREDENTIALS")
+
 		contents, err := util.FileOrData(creds)
 		if err != nil {
-			return nil, fmt.Errorf("Error loading credentials: %s", err)
+			return nil, fmt.Errorf("Error loading credentials: %w", err)
 		}
 
 		if err := json.Unmarshal([]byte(contents), &account); err != nil {
-			return nil, fmt.Errorf("Error parsing credentials '%s': %s", contents, err)
+			return nil, fmt.Errorf("Error parsing credentials '%s': %w", contents, err)
 		}
 
 		if err := json.Unmarshal([]byte(contents), &account); err != nil {
-			return nil, fmt.Errorf("Error parsing credentials '%s': %s", contents, err)
+			return nil, fmt.Errorf("Error parsing credentials '%s': %w", contents, err)
 		}
 
 		conf := jwt.Config{
@@ -504,6 +520,7 @@ func CreateGCSClient(gcsConfigRemote RemoteStateConfigGCS) (*storage.Client, err
 		if err != nil {
 			return nil, err
 		}
+
 		opts = append(opts, option.WithTokenSource(ts))
 	}
 
@@ -520,5 +537,5 @@ func CreateGCSClient(gcsConfigRemote RemoteStateConfigGCS) (*storage.Client, err
 type MissingRequiredGCSRemoteStateConfig string
 
 func (configName MissingRequiredGCSRemoteStateConfig) Error() string {
-	return fmt.Sprintf("Missing required GCS remote state configuration %s", string(configName))
+	return "Missing required GCS remote state configuration " + string(configName)
 }

@@ -1,27 +1,32 @@
-package dynamodb
+//go:build aws
+
+package dynamodb_test
 
 import (
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	awsDynamodb "github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/gruntwork-io/go-commons/errors"
+	"github.com/gruntwork-io/terragrunt/dynamodb"
 	"github.com/gruntwork-io/terragrunt/options"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestCreateLockTableIfNecessaryTableDoesntAlreadyExist(t *testing.T) {
+func TestAwsCreateLockTableIfNecessaryTableDoesntAlreadyExist(t *testing.T) {
 	t.Parallel()
 
-	withLockTable(t, func(tableName string, client *dynamodb.DynamoDB) {
+	withLockTable(t, func(tableName string, client *awsDynamodb.DynamoDB) {
 		assertCanWriteToTable(t, tableName, client)
 	})
 }
 
-func TestCreateLockTableConcurrency(t *testing.T) {
+func TestAwsCreateLockTableConcurrency(t *testing.T) {
 	t.Parallel()
 
 	mockOptions, err := options.NewTerragruntOptionsForTest("dynamo_lock_test_utils")
@@ -44,15 +49,15 @@ func TestCreateLockTableConcurrency(t *testing.T) {
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			err := CreateLockTableIfNecessary(tableName, nil, client, mockOptions)
-			assert.Nil(t, err, "Unexpected error: %v", err)
+			err := dynamodb.CreateLockTableIfNecessary(tableName, nil, client, mockOptions)
+			assert.NoError(t, err, "Unexpected error: %v", err)
 		}()
 	}
 
 	waitGroup.Wait()
 }
 
-func TestWaitForTableToBeActiveTableDoesNotExist(t *testing.T) {
+func TestAwsWaitForTableToBeActiveTableDoesNotExist(t *testing.T) {
 	t.Parallel()
 
 	mockOptions, err := options.NewTerragruntOptionsForTest("dynamo_lock_test_utils")
@@ -64,12 +69,12 @@ func TestWaitForTableToBeActiveTableDoesNotExist(t *testing.T) {
 	tableName := "terragrunt-table-does-not-exist"
 	retries := 5
 
-	err = waitForTableToBeActiveWithRandomSleep(tableName, client, retries, 1*time.Millisecond, 500*time.Millisecond, mockOptions)
+	err = dynamodb.WaitForTableToBeActiveWithRandomSleep(tableName, client, retries, 1*time.Millisecond, 500*time.Millisecond, mockOptions)
 
-	assert.True(t, errors.IsError(err, TableActiveRetriesExceeded{TableName: tableName, Retries: retries}), "Unexpected error of type %s: %s", reflect.TypeOf(err), err)
+	assert.True(t, errors.IsError(err, dynamodb.TableActiveRetriesExceeded{TableName: tableName, Retries: retries}), "Unexpected error of type %s: %s", reflect.TypeOf(err), err)
 }
 
-func TestCreateLockTableIfNecessaryTableAlreadyExists(t *testing.T) {
+func TestAwsCreateLockTableIfNecessaryTableAlreadyExists(t *testing.T) {
 	t.Parallel()
 
 	mockOptions, err := options.NewTerragruntOptionsForTest("dynamo_lock_test_utils")
@@ -78,16 +83,16 @@ func TestCreateLockTableIfNecessaryTableAlreadyExists(t *testing.T) {
 	}
 
 	// Create the table the first time
-	withLockTable(t, func(tableName string, client *dynamodb.DynamoDB) {
+	withLockTable(t, func(tableName string, client *awsDynamodb.DynamoDB) {
 		assertCanWriteToTable(t, tableName, client)
 
 		// Try to create the table the second time and make sure you get no errors
-		err = CreateLockTableIfNecessary(tableName, nil, client, mockOptions)
-		assert.Nil(t, err, "Unexpected error: %v", err)
+		err = dynamodb.CreateLockTableIfNecessary(tableName, nil, client, mockOptions)
+		require.NoError(t, err, "Unexpected error: %v", err)
 	})
 }
 
-func TestTableTagging(t *testing.T) {
+func TestAwsTableTagging(t *testing.T) {
 	t.Parallel()
 
 	mockOptions, err := options.NewTerragruntOptionsForTest("dynamo_lock_test_utils")
@@ -98,29 +103,27 @@ func TestTableTagging(t *testing.T) {
 	tags := map[string]string{"team": "team A"}
 
 	// Create the table the first time
-	withLockTableTagged(t, tags, func(tableName string, client *dynamodb.DynamoDB) {
+	withLockTableTagged(t, tags, func(tableName string, client *awsDynamodb.DynamoDB) {
 		assertCanWriteToTable(t, tableName, client)
 
-		assertTags(tags, tableName, client, t)
+		assertTags(t, tags, tableName, client)
 
 		// Try to create the table the second time and make sure you get no errors
-		err = CreateLockTableIfNecessary(tableName, nil, client, mockOptions)
-		assert.Nil(t, err, "Unexpected error: %v", err)
+		err = dynamodb.CreateLockTableIfNecessary(tableName, nil, client, mockOptions)
+		require.NoError(t, err, "Unexpected error: %v", err)
 	})
 }
 
-func assertTags(expectedTags map[string]string, tableName string, client *dynamodb.DynamoDB, t *testing.T) {
-	var description, err = client.DescribeTable(&dynamodb.DescribeTableInput{TableName: aws.String(tableName)})
+func assertTags(t *testing.T, expectedTags map[string]string, tableName string, client *awsDynamodb.DynamoDB) {
+	t.Helper()
+
+	var description, err = client.DescribeTable(&awsDynamodb.DescribeTableInput{TableName: aws.String(tableName)})
 
 	if err != nil {
-		t.Fatal(err)
+		require.NoError(t, err, "Unexpected error: %v", err)
 	}
 
-	var tags, err2 = client.ListTagsOfResource(&dynamodb.ListTagsOfResourceInput{ResourceArn: description.Table.TableArn})
-
-	if err2 != nil {
-		t.Fatal(err2)
-	}
+	var tags = listTagsOfResourceWithRetry(t, client, description.Table.TableArn)
 
 	var actualTags = make(map[string]string)
 
@@ -129,4 +132,29 @@ func assertTags(expectedTags map[string]string, tableName string, client *dynamo
 	}
 
 	assert.Equal(t, expectedTags, actualTags, "Did not find expected tags on dynamo table.")
+}
+
+func listTagsOfResourceWithRetry(t *testing.T, client *awsDynamodb.DynamoDB, resourceArn *string) *awsDynamodb.ListTagsOfResourceOutput {
+	t.Helper()
+
+	const (
+		delay   = 1 * time.Second
+		retries = 5
+	)
+
+	for range retries {
+		var tags, err = client.ListTagsOfResource(&awsDynamodb.ListTagsOfResourceInput{ResourceArn: resourceArn})
+		if err != nil {
+			require.NoError(t, err, "Unexpected error: %v", err)
+		}
+
+		if len(tags.Tags) > 0 {
+			return tags
+		}
+
+		time.Sleep(delay)
+	}
+
+	require.Failf(t, "Could not list tags of resource after %s retries.", strconv.Itoa(retries))
+	return nil
 }

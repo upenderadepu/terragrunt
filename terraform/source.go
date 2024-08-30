@@ -2,6 +2,7 @@ package terraform
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
@@ -84,12 +85,13 @@ func (terraformSource Source) EncodeSourceVersion() (string, error) {
 		})
 
 		if err == nil {
-			hash := fmt.Sprintf("%x", sourceHash.Sum(nil))
+			hash := hex.EncodeToString(sourceHash.Sum(nil))
 
 			return hash, nil
 		}
 
 		terraformSource.Logger.WithError(err).Warningf("Could not encode version for local source")
+
 		return "", err
 	}
 
@@ -111,7 +113,9 @@ func (terraformSource Source) WriteVersionFile() error {
 		}
 	}
 
-	return errors.WithStackTrace(os.WriteFile(terraformSource.VersionFile, []byte(version), 0640))
+	const ownerReadWriteGroupReadPerms = 0640
+
+	return errors.WithStackTrace(os.WriteFile(terraformSource.VersionFile, []byte(version), ownerReadWriteGroupReadPerms))
 }
 
 // Take the given source path and create a Source struct from it, including the folder where the source should
@@ -142,7 +146,6 @@ func (terraformSource Source) WriteVersionFile() error {
 //  2. Only download source URLs pointing to remote paths if /T/W/H doesn't already exist or, if it does exist, if the
 //     version number in /T/W/H/.terragrunt-source-version doesn't match the current version.
 func NewSource(source string, downloadDir string, workingDir string, logger *logrus.Entry) (*Source, error) {
-
 	canonicalWorkingDir, err := util.CanonicalPath(workingDir, "")
 	if err != nil {
 		return nil, err
@@ -166,6 +169,7 @@ func NewSource(source string, downloadDir string, workingDir string, logger *log
 		if err != nil {
 			return nil, err
 		}
+
 		rootSourceUrl.Path = canonicalFilePath
 	}
 
@@ -226,10 +230,12 @@ func normalizeSourceURL(source string, workingDir string) (string, error) {
 		if err != nil {
 			return source, errors.WithStackTrace(err)
 		}
+
 		if ok {
 			return newSource, nil
 		}
 	}
+
 	return source, nil
 }
 
@@ -270,7 +276,7 @@ func IsLocalSource(sourceUrl *url.URL) bool {
 // path is everything after the double slash. If there is no double-slash in the URL, the root repo is the entire
 // sourceUrl and the path is an empty string.
 func SplitSourceUrl(sourceUrl *url.URL, logger *logrus.Entry) (*url.URL, string, error) {
-	pathSplitOnDoubleSlash := strings.SplitN(sourceUrl.Path, "//", 2)
+	pathSplitOnDoubleSlash := strings.SplitN(sourceUrl.Path, "//", 2) //nolint:mnd
 
 	if len(pathSplitOnDoubleSlash) > 1 {
 		sourceUrlModifiedPath, err := parseSourceUrl(sourceUrl.String())
@@ -279,6 +285,7 @@ func SplitSourceUrl(sourceUrl *url.URL, logger *logrus.Entry) (*url.URL, string,
 		}
 
 		sourceUrlModifiedPath.Path = pathSplitOnDoubleSlash[0]
+
 		return sourceUrlModifiedPath, pathSplitOnDoubleSlash[1], nil
 	}
 	// check if path is remote URL
@@ -291,6 +298,7 @@ func SplitSourceUrl(sourceUrl *url.URL, logger *logrus.Entry) (*url.URL, string,
 		// log warning message to notify user that sourceUrl.Path may not work
 		logger.Warningf("No double-slash (//) found in source URL %s. Relative paths in downloaded Terraform code may not work.", sourceUrl.Path)
 	}
+
 	return sourceUrl, "", nil
 }
 

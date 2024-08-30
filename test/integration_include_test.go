@@ -1,4 +1,4 @@
-package test
+package test_test
 
 import (
 	"bytes"
@@ -33,25 +33,27 @@ func TestTerragruntWorksWithIncludeLocals(t *testing.T) {
 	files, err := os.ReadDir(includeExposeFixturePath)
 	require.NoError(t, err)
 
-	testCases := []string{}
+	tc := []string{}
 	for _, finfo := range files {
 		if finfo.IsDir() {
-			testCases = append(testCases, finfo.Name())
+			tc = append(tc, finfo.Name())
 		}
 	}
 
-	for _, testCase := range testCases {
+	for _, tt := range tc {
 		// Capture range variable to avoid it changing across parallel test runs
-		testCase := testCase
+		tt := tt
 
-		t.Run(filepath.Base(testCase), func(t *testing.T) {
-			childPath := filepath.Join(includeExposeFixturePath, testCase, includeChildFixturePath)
+		t.Run(filepath.Base(tt), func(t *testing.T) {
+			t.Parallel()
+
+			childPath := filepath.Join(includeExposeFixturePath, tt, includeChildFixturePath)
 			cleanupTerraformFolder(t, childPath)
-			runTerragrunt(t, fmt.Sprintf("terragrunt run-all apply -auto-approve --terragrunt-include-external-dependencies --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir %s", childPath))
+			runTerragrunt(t, "terragrunt run-all apply -auto-approve --terragrunt-include-external-dependencies --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir "+childPath)
 
 			stdout := bytes.Buffer{}
 			stderr := bytes.Buffer{}
-			err := runTerragruntCommand(t, fmt.Sprintf("terragrunt output -no-color -json --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir %s", childPath), &stdout, &stderr)
+			err := runTerragruntCommand(t, "terragrunt output -no-color -json --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir "+childPath, &stdout, &stderr)
 			require.NoError(t, err)
 
 			outputs := map[string]TerraformOutput{}
@@ -67,8 +69,8 @@ func TestTerragruntWorksWithIncludeShallowMerge(t *testing.T) {
 	childPath := util.JoinPath(includeFixturePath, includeShallowFixturePath)
 	cleanupTerraformFolder(t, childPath)
 
-	s3BucketName := fmt.Sprintf("terragrunt-test-bucket-%s", strings.ToLower(uniqueId()))
-	defer deleteS3Bucket(t, TERRAFORM_REMOTE_STATE_S3_REGION, s3BucketName)
+	s3BucketName := "terragrunt-test-bucket-" + strings.ToLower(uniqueId())
+	defer deleteS3Bucket(t, terraformRemoteStateS3Region, s3BucketName)
 
 	tmpTerragruntConfigPath := createTmpTerragruntConfigWithParentAndChild(t, includeFixturePath, includeShallowFixturePath, s3BucketName, config.DefaultTerragruntConfigPath, config.DefaultTerragruntConfigPath)
 
@@ -130,10 +132,7 @@ func TestTerragruntRunAllModulesWithPrefix(t *testing.T) {
 	stderr := bytes.Buffer{}
 	err := runTerragruntCommand(
 		t,
-		fmt.Sprintf(
-			"terragrunt run-all plan --terragrunt-non-interactive --terragrunt-include-module-prefix --terragrunt-working-dir %s",
-			modulePath,
-		),
+		"terragrunt run-all plan --terragrunt-non-interactive --terragrunt-working-dir "+modulePath,
 		&stdout,
 		&stderr,
 	)
@@ -149,13 +148,13 @@ func TestTerragruntRunAllModulesWithPrefix(t *testing.T) {
 	stdoutLines := strings.Split(planOutput, "\n")
 	for _, line := range stdoutLines {
 		if strings.Contains(line, "alpha") {
-			assert.Contains(t, line, includeRunAllFixturePath+"a")
+			assert.Contains(t, line, "prefix=a")
 		}
 		if strings.Contains(line, "beta") {
-			assert.Contains(t, line, includeRunAllFixturePath+"b")
+			assert.Contains(t, line, "prefix=b")
 		}
 		if strings.Contains(line, "charlie") {
-			assert.Contains(t, line, includeRunAllFixturePath+"c")
+			assert.Contains(t, line, "prefix=c")
 		}
 	}
 }
@@ -166,11 +165,11 @@ func TestTerragruntWorksWithIncludeDeepMerge(t *testing.T) {
 	childPath := util.JoinPath(includeDeepFixturePath, "child")
 	cleanupTerraformFolder(t, childPath)
 
-	runTerragrunt(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir %s", childPath))
+	runTerragrunt(t, "terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir "+childPath)
 
 	stdout := bytes.Buffer{}
 	stderr := bytes.Buffer{}
-	err := runTerragruntCommand(t, fmt.Sprintf("terragrunt output -no-color -json --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir %s", childPath), &stdout, &stderr)
+	err := runTerragruntCommand(t, "terragrunt output -no-color -json --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir "+childPath, &stdout, &stderr)
 	require.NoError(t, err)
 
 	outputs := map[string]TerraformOutput{}
@@ -220,11 +219,11 @@ func TestTerragruntWorksWithMultipleInclude(t *testing.T) {
 
 			childPath := filepath.Join(includeMultipleFixturePath, testCase, includeDeepFixtureChildPath)
 			cleanupTerraformFolder(t, childPath)
-			runTerragrunt(t, fmt.Sprintf("terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir %s", childPath))
+			runTerragrunt(t, "terragrunt apply -auto-approve --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir "+childPath)
 
 			stdout := bytes.Buffer{}
 			stderr := bytes.Buffer{}
-			err := runTerragruntCommand(t, fmt.Sprintf("terragrunt output -no-color -json --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir %s", childPath), &stdout, &stderr)
+			err := runTerragruntCommand(t, "terragrunt output -no-color -json --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-working-dir "+childPath, &stdout, &stderr)
 			require.NoError(t, err)
 
 			outputs := map[string]TerraformOutput{}
@@ -235,6 +234,8 @@ func TestTerragruntWorksWithMultipleInclude(t *testing.T) {
 }
 
 func validateMultipleIncludeTestOutput(t *testing.T, outputs map[string]TerraformOutput) {
+	t.Helper()
+
 	assert.Equal(t, "mock", outputs["attribute"].Value.(string))
 	assert.Equal(t, "new val", outputs["new_attribute"].Value.(string))
 	assert.Equal(t, "old val", outputs["old_attribute"].Value.(string))
@@ -258,6 +259,8 @@ func validateMultipleIncludeTestOutput(t *testing.T, outputs map[string]Terrafor
 }
 
 func validateIncludeRemoteStateReflection(t *testing.T, s3BucketName string, keyPath string, configPath string, workingDir string) {
+	t.Helper()
+
 	stdout := bytes.Buffer{}
 	stderr := bytes.Buffer{}
 	err := runTerragruntCommand(t, fmt.Sprintf("terragrunt output -no-color -json --terragrunt-non-interactive --terragrunt-log-level debug --terragrunt-config %s --terragrunt-working-dir %s", configPath, workingDir), &stdout, &stderr)
@@ -269,7 +272,6 @@ func validateIncludeRemoteStateReflection(t *testing.T, s3BucketName string, key
 	require.NoError(t, json.Unmarshal([]byte(outputs["reflect"].Value.(string)), &remoteStateOut))
 	assert.Equal(
 		t,
-		remoteStateOut,
 		map[string]interface{}{
 			"backend":                         "s3",
 			"disable_init":                    false,
@@ -282,5 +284,6 @@ func validateIncludeRemoteStateReflection(t *testing.T, s3BucketName string, key
 				"region":  "us-west-2",
 			},
 		},
+		remoteStateOut,
 	)
 }

@@ -47,6 +47,7 @@ func updateList(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 						if err != nil {
 							return m, rendererErrCmd(err)
 						}
+
 						content = md
 					} else {
 						content = selectedModule.Content(true)
@@ -73,6 +74,7 @@ func updateList(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 
 	// Handle keyboard and mouse events for the list
 	m.list, cmd = m.list.Update(msg)
+
 	return m, cmd
 }
 
@@ -86,9 +88,11 @@ func updatePager(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		bb, cmd := m.buttonBar.Update(msg)
 		m.buttonBar = bb.(*buttonbar.ButtonBar)
+
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+
 		switch {
 		case key.Matches(msg, m.pagerKeys.Choose):
 			// Choose changes the action depending on the active button
@@ -151,7 +155,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case rendererErrMsg:
-		m.viewport.SetContent(fmt.Sprintf("there was an error rendering markdown: %s", msg.err.Error()))
+		m.viewport.SetContent("there was an error rendering markdown: " + msg.err.Error())
 		// ensure we show the viewport
 		m.state = pagerState
 	}

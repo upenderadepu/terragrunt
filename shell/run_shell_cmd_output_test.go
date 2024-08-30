@@ -1,19 +1,24 @@
 //go:build linux || darwin
 // +build linux darwin
 
-package shell
+package shell_test
 
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/gruntwork-io/terragrunt/internal/log/formatter"
+	"github.com/gruntwork-io/terragrunt/shell"
+	"github.com/gruntwork-io/terragrunt/util"
+
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gruntwork-io/terragrunt/options"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestCommandOutputOrder(t *testing.T) {
@@ -44,18 +49,26 @@ var STDOUT = []string{"stdout1", "stdout2"}
 var STDERR = []string{"stderr1", "stderr2", "stderr3"}
 
 func testCommandOutputOrder(t *testing.T, withPtty bool, fullOutput []string, stdout []string, stderr []string) {
+	t.Helper()
+
 	testCommandOutput(t, noop[*options.TerragruntOptions], assertOutputs(t, fullOutput, stdout, stderr), withPtty)
 }
 
 func TestCommandOutputPrefix(t *testing.T) {
-	prefix := "PREFIX> "
+	t.Parallel()
+	prefix := "PREFIX"
 	prefixedOutput := []string{}
 	for _, line := range FULL_OUTPUT {
-		prefixedOutput = append(prefixedOutput, prefix+line)
+		prefixedOutput = append(prefixedOutput, fmt.Sprintf("prefix=%s msg=%s", prefix, line))
 	}
+
+	formatter := formatter.NewFormatter()
+	formatter.DisableLogFormatting = true
+
 	testCommandOutput(t, func(terragruntOptions *options.TerragruntOptions) {
-		terragruntOptions.IncludeModulePrefix = true
+		terragruntOptions.TerraformPath = ""
 		terragruntOptions.OutputPrefix = prefix
+		terragruntOptions.Logger.Logger.Formatter = formatter
 	}, assertOutputs(t,
 		prefixedOutput,
 		STDOUT,
@@ -63,7 +76,9 @@ func TestCommandOutputPrefix(t *testing.T) {
 	), true)
 }
 
-func testCommandOutput(t *testing.T, withOptions func(*options.TerragruntOptions), assertResults func(string, *CmdOutput), allocateStdout bool) {
+func testCommandOutput(t *testing.T, withOptions func(*options.TerragruntOptions), assertResults func(string, *util.CmdOutput), allocateStdout bool) {
+	t.Helper()
+
 	terragruntOptions, err := options.NewTerragruntOptionsForTest("")
 	require.NoError(t, err, "Unexpected error creating NewTerragruntOptionsForTest: %v", err)
 
@@ -77,11 +92,12 @@ func testCommandOutput(t *testing.T, withOptions func(*options.TerragruntOptions
 
 	withOptions(terragruntOptions)
 
-	out, err := RunShellCommandWithOutput(context.Background(), terragruntOptions, "", !allocateStdout, false, "../testdata/test_outputs.sh", "same")
+	out, err := shell.RunShellCommandWithOutput(context.Background(), terragruntOptions, "", !allocateStdout, false, "../testdata/test_outputs.sh", "same")
 
-	require.NotNil(t, out, "Should get output")
-	assert.Nil(t, err, "Should have no error")
+	assert.NotNil(t, out, "Should get output")
+	require.NoError(t, err, "Should have no error")
 
+	assert.NotNil(t, out, "Should get output")
 	assertResults(allOutputBuffer.String(), out)
 }
 
@@ -90,10 +106,15 @@ func assertOutputs(
 	expectedAllOutputs []string,
 	expectedStdOutputs []string,
 	expectedStdErrs []string,
-) func(string, *CmdOutput) {
-	return func(allOutput string, out *CmdOutput) {
+) func(string, *util.CmdOutput) {
+	t.Helper()
+
+	return func(allOutput string, out *util.CmdOutput) {
 		allOutputs := strings.Split(strings.TrimSpace(allOutput), "\n")
-		assert.Equal(t, expectedAllOutputs, allOutputs)
+		assert.Equal(t, len(expectedAllOutputs), len(allOutputs))
+		for i := 0; i < len(allOutputs); i++ {
+			assert.Contains(t, allOutputs[i], expectedAllOutputs[i])
+		}
 
 		stdOutputs := strings.Split(strings.TrimSpace(out.Stdout), "\n")
 		assert.Equal(t, expectedStdOutputs, stdOutputs)

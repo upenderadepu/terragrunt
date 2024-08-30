@@ -6,7 +6,7 @@ import (
 
 	"github.com/gruntwork-io/go-commons/collections"
 	"github.com/gruntwork-io/go-commons/errors"
-	"github.com/gruntwork-io/terragrunt/pkg/log"
+	"github.com/gruntwork-io/terragrunt/internal/log"
 )
 
 const (
@@ -44,10 +44,11 @@ func NewModule(repo *Repo, moduleDir string) (*Module, error) {
 
 	log.Debugf("Found module in directory %q", moduleDir)
 
-	moduleURL, err := repo.moduleURL(moduleDir)
+	moduleURL, err := repo.ModuleURL(moduleDir)
 	if err != nil {
 		return nil, err
 	}
+
 	module.url = moduleURL
 
 	modulePath := filepath.Join(module.repoPath, module.moduleDir)
@@ -56,6 +57,7 @@ func NewModule(repo *Repo, moduleDir string) (*Module, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	module.Doc = doc
 
 	return module, nil
@@ -114,4 +116,8 @@ func (module *Module) isValid() (bool, error) {
 	}
 
 	return false, nil
+}
+
+func (module *Module) ModuleDir() string {
+	return module.moduleDir
 }

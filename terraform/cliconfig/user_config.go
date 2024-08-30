@@ -50,7 +50,7 @@ func UserProviderDir() (string, error) {
 }
 
 func getUserCredentials(cfg *cliconfig.Config) []ConfigCredentials {
-	var credentials []ConfigCredentials
+	var credentials = make([]ConfigCredentials, 0, len(cfg.Credentials))
 
 	for name, credential := range cfg.Credentials {
 		var token string
@@ -90,10 +90,11 @@ func getUserCredentialsHelpers(cfg *cliconfig.Config) *ConfigCredentialsHelper {
 }
 
 func getUserHosts(cfg *cliconfig.Config) []ConfigHost {
-	var hosts []ConfigHost
+	var hosts = make([]ConfigHost, 0, len(cfg.Hosts))
 
 	for name, host := range cfg.Hosts {
 		services := make(map[string]string)
+
 		if host != nil {
 			for key, val := range host.Services {
 				if val, ok := val.(string); ok {

@@ -5,12 +5,15 @@ import (
 	"net/http/httputil"
 	"net/url"
 
-	"github.com/gruntwork-io/terragrunt/pkg/log"
+	"github.com/gruntwork-io/terragrunt/internal/log"
+	"github.com/gruntwork-io/terragrunt/terraform/cliconfig"
+	svchost "github.com/hashicorp/terraform-svchost"
 	"github.com/labstack/echo/v4"
 )
 
 type ReverseProxy struct {
-	ServerURL *url.URL
+	ServerURL   *url.URL
+	CredsSource *cliconfig.CredentialsSource
 
 	Rewrite        func(*httputil.ProxyRequest)
 	ModifyResponse func(resp *http.Response) error
@@ -33,6 +36,13 @@ func (reverseProxy *ReverseProxy) NewRequest(ctx echo.Context, targetURL *url.UR
 			req.Out.Host = targetURL.Host
 			req.Out.URL = targetURL
 
+			if reverseProxy.CredsSource != nil {
+				hostname := svchost.Hostname(req.Out.URL.Hostname())
+				if creds := reverseProxy.CredsSource.ForHost(hostname); creds != nil {
+					creds.PrepareRequest(req.Out)
+				}
+			}
+
 			if reverseProxy.Rewrite != nil {
 				reverseProxy.Rewrite(req)
 			}
@@ -54,5 +64,6 @@ func (reverseProxy *ReverseProxy) NewRequest(ctx echo.Context, targetURL *url.UR
 	}
 
 	proxy.ServeHTTP(ctx.Response(), ctx.Request())
+
 	return nil
 }

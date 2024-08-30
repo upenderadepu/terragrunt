@@ -2,11 +2,12 @@ package util
 
 import (
 	"context"
+	goErrors "errors"
 	"fmt"
 	"time"
 
 	"github.com/gruntwork-io/go-commons/errors"
-	"github.com/gruntwork-io/terragrunt/pkg/log"
+	"github.com/gruntwork-io/terragrunt/internal/log"
 	"github.com/sirupsen/logrus"
 )
 
@@ -22,7 +23,8 @@ func DoWithRetry(ctx context.Context, actionDescription string, maxRetries int, 
 			return nil
 		}
 
-		if _, isFatalErr := err.(FatalError); isFatalErr {
+		var fatalErr FatalError
+		if ok := goErrors.As(err, &fatalErr); ok {
 			return err
 		}
 
@@ -34,10 +36,9 @@ func DoWithRetry(ctx context.Context, actionDescription string, maxRetries int, 
 		log.Errorf("%s returned an error: %s. Retry %d of %d. Sleeping for %s and will try again.", actionDescription, err.Error(), i, maxRetries, sleepBetweenRetries)
 
 		select {
+		case <-time.After(sleepBetweenRetries): // Try again
 		case <-ctx.Done():
 			return errors.WithStackTrace(ctx.Err())
-		case <-time.After(sleepBetweenRetries):
-			// try again
 		}
 	}
 

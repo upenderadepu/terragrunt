@@ -34,9 +34,10 @@ const versionParts = 3
 // - TerraformVersion
 // TODO: Look into a way to refactor this function to avoid the side effect.
 func checkVersionConstraints(ctx context.Context, terragruntOptions *options.TerragruntOptions) error {
-	configContext := config.NewParsingContext(context.Background(), terragruntOptions).WithDecodeList(config.TerragruntVersionConstraints)
+	configContext := config.NewParsingContext(ctx, terragruntOptions).WithDecodeList(config.TerragruntVersionConstraints)
 
-	partialTerragruntConfig, err := config.PartialParseConfigFile(
+	// TODO: See if we should be ignore this lint error
+	partialTerragruntConfig, err := config.PartialParseConfigFile( //nolint: contextcheck
 		configContext,
 		terragruntOptions.TerragruntConfigPath,
 		nil,
@@ -50,6 +51,7 @@ func checkVersionConstraints(ctx context.Context, terragruntOptions *options.Ter
 	if terragruntOptions.TerraformPath == options.DefaultWrappedPath && partialTerragruntConfig.TerraformBinary != "" {
 		terragruntOptions.TerraformPath = partialTerragruntConfig.TerraformBinary
 	}
+
 	if err := PopulateTerraformVersion(ctx, terragruntOptions); err != nil {
 		return err
 	}
@@ -58,6 +60,7 @@ func checkVersionConstraints(ctx context.Context, terragruntOptions *options.Ter
 	if partialTerragruntConfig.TerraformVersionConstraint != "" {
 		terraformVersionConstraint = partialTerragruntConfig.TerraformVersionConstraint
 	}
+
 	if err := CheckTerraformVersion(terraformVersionConstraint, terragruntOptions); err != nil {
 		return err
 	}
@@ -67,16 +70,20 @@ func checkVersionConstraints(ctx context.Context, terragruntOptions *options.Ter
 			return err
 		}
 	}
+
 	return nil
 }
 
 // Populate the currently installed version of Terraform into the given terragruntOptions
 func PopulateTerraformVersion(ctx context.Context, terragruntOptions *options.TerragruntOptions) error {
 	// Discard all log output to make sure we don't pollute stdout or stderr with this extra call to '--version'
-	terragruntOptionsCopy := terragruntOptions.Clone(terragruntOptions.TerragruntConfigPath)
+	terragruntOptionsCopy, err := terragruntOptions.Clone(terragruntOptions.TerragruntConfigPath)
+	if err != nil {
+		return err
+	}
+
 	terragruntOptionsCopy.Writer = io.Discard
 	terragruntOptionsCopy.ErrWriter = io.Discard
-
 	// Remove any TF_CLI_ARGS before version checking. These are appended to
 	// the arguments supplied on the command line and cause issues when running
 	// the --version command.
@@ -92,7 +99,7 @@ func PopulateTerraformVersion(ctx context.Context, terragruntOptions *options.Te
 		return err
 	}
 
-	terraformVersion, err := parseTerraformVersion(output.Stdout)
+	terraformVersion, err := ParseTerraformVersion(output.Stdout)
 	if err != nil {
 		return err
 	}
@@ -111,23 +118,24 @@ func PopulateTerraformVersion(ctx context.Context, terragruntOptions *options.Te
 	} else {
 		terragruntOptions.Logger.Debugf("%s version: %s", tfImplementation, terraformVersion)
 	}
+
 	return nil
 }
 
 // Check that the currently installed Terraform version works meets the specified version constraint and return an error
 // if it doesn't
 func CheckTerraformVersion(constraint string, terragruntOptions *options.TerragruntOptions) error {
-	return checkTerraformVersionMeetsConstraint(terragruntOptions.TerraformVersion, constraint)
+	return CheckTerraformVersionMeetsConstraint(terragruntOptions.TerraformVersion, constraint)
 }
 
 // Check that the currently running Terragrunt version meets the specified version constraint and return an error
 // if it doesn't
 func CheckTerragruntVersion(constraint string, terragruntOptions *options.TerragruntOptions) error {
-	return checkTerragruntVersionMeetsConstraint(terragruntOptions.TerragruntVersion, constraint)
+	return CheckTerragruntVersionMeetsConstraint(terragruntOptions.TerragruntVersion, constraint)
 }
 
 // Check that the current version of Terragrunt meets the specified constraint and return an error if it doesn't
-func checkTerragruntVersionMeetsConstraint(currentVersion *version.Version, constraint string) error {
+func CheckTerragruntVersionMeetsConstraint(currentVersion *version.Version, constraint string) error {
 	versionConstraint, err := version.NewConstraint(constraint)
 	if err != nil {
 		return err
@@ -141,7 +149,7 @@ func checkTerragruntVersionMeetsConstraint(currentVersion *version.Version, cons
 }
 
 // Check that the current version of Terraform meets the specified constraint and return an error if it doesn't
-func checkTerraformVersionMeetsConstraint(currentVersion *version.Version, constraint string) error {
+func CheckTerraformVersionMeetsConstraint(currentVersion *version.Version, constraint string) error {
 	versionConstraint, err := version.NewConstraint(constraint)
 	if err != nil {
 		return err
@@ -155,7 +163,7 @@ func checkTerraformVersionMeetsConstraint(currentVersion *version.Version, const
 }
 
 // Parse the output of the terraform --version command
-func parseTerraformVersion(versionCommandOutput string) (*version.Version, error) {
+func ParseTerraformVersion(versionCommandOutput string) (*version.Version, error) {
 	matches := TerraformVersionRegex.FindStringSubmatch(versionCommandOutput)
 
 	if len(matches) != versionParts {
@@ -172,6 +180,7 @@ func parseTerraformImplementationType(versionCommandOutput string) (options.Terr
 	if len(matches) != versionParts {
 		return options.UnknownImpl, errors.WithStackTrace(InvalidTerraformVersionSyntax(versionCommandOutput))
 	}
+
 	rawType := strings.ToLower(matches[1])
 	switch rawType {
 	case "terraform":
@@ -188,7 +197,7 @@ func parseTerraformImplementationType(versionCommandOutput string) (options.Terr
 type InvalidTerraformVersionSyntax string
 
 func (err InvalidTerraformVersionSyntax) Error() string {
-	return fmt.Sprintf("Unable to parse Terraform version output: %s", string(err))
+	return "Unable to parse Terraform version output: " + string(err)
 }
 
 type InvalidTerraformVersion struct {
